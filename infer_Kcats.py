@@ -117,20 +117,43 @@ def Seq_to_vec(Sequence):
 if __name__ == '__main__':
     # todo add checks that this runs correctly and all files exist etc.
     # todo make this production-grade code
+
+    #### IMPORTANT ####
+    # This script requires specific scikit version which only works (verified with) python 3.8
+
+    # In addition, it requires three files to be available:
+    #   - final_SMILES_metabolite_df.csv (contains the metabolites with SMILES)
+    #   - final_transcript_sequence_df.csv (contains the genes with sequences)
+    #   - gene_smiles_reactions_pairs.json (contains the gene-metabolite pairs to infer kcats for)
+
+    # These files can be created with some of the metabolic task score preprocessing scripts
+    # and will be made available/adapted for SWaPAM
+
+    # Running this script will create the following files:
+    #   - protein_sequence_tensors.pkl (contains the tensors for the sequences and can be reused)
+    #   - SMILES_tensors.pkl (contains the tensors for the SMILES and can be reused)
+    #   - per_gene_combination_results_*.json/csv (intermediate results, can be deleted after running)
+    #   - final_per_gene_combination_results.json/csv (final results with statistics)
+    #   - missing_genes_and_SMILES.csv (list of genes and SMILES that were not found in the input files)
+    ####################
+    
+    ### Options and file paths
+    # Multiple predictions are made by multiplying SMILES, later on the statistics are created
+    # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
     amount_of_times_to_multiply_smiles = 50
-    type_of_SMILES = 'isomeric SMILES'
-    batch_size = 50
-    duplicate_seq_tensor = True
     combinations_output_location = r"C:\Git\Metabolic_Task_Score\Data\Main_files\For_running\combinations\HumanGem17_DCM_test_metabolic_tasks_2024_v1_01"
+    type_of_SMILES = 'isomeric SMILES' # seems to be what UniKP uses
+
+    ### File loading
     SMILES_df = pd.read_csv(
         os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"))
     sequence_df = pd.read_csv(
         os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"))
-    # gene_smiles_reactions_pairs.json
-
     with open(os.path.join(combinations_output_location, "gene_smiles_reactions_pairs.json"), "r") as f:
         gene_smiles_reactions_dict = json.load(f)
 
+
+    # Create or load tensors
     sequences = sequence_df["protein_sequence"].values.tolist()
     sequences = sequences
     if not os.path.exists(os.path.join(combinations_output_location, f"protein_sequence_tensors.pkl")):
@@ -143,6 +166,8 @@ if __name__ == '__main__':
         with open(os.path.join(combinations_output_location, f"protein_sequence_tensors.pkl"),
                 "rb") as f:
             seq_vec = pickle.load(f)
+
+    # create duplicates of the sequence tensors if needed
     seq_vec = np.array([seq.copy() for seq in seq_vec for i in range(amount_of_times_to_multiply_smiles)])
     smiles_ = SMILES_df[type_of_SMILES].values.tolist()
     smiles_unique = []
@@ -217,17 +242,26 @@ if __name__ == '__main__':
         per_gene_combination_results = {}
         for idx, value in enumerate(list(gene_smiles_reactions_dict.values())[start:end]):
             # in sets of amounht_of_times_to_multiply_smiles
-            results = Pre_label[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)]
+            log_results = Pre_label[
+                          idx*amount_of_times_to_multiply_smiles:
+                          ((idx + 1)*amount_of_times_to_multiply_smiles)
+                          ]
+            # since data is in log scale, we need to convert it back to normal scale for statistics
+            # then convert those back to log scale
+            linear_results = np.array([10**x for x in log_results])
+
             dict_ = {}
-            dict_["min"] = np.min(results)
-            dict_["max"] = np.max(results)
-            dict_["median"] = np.median(results)
-            dict_["iqr"] = np.percentile(results, 75) - np.percentile(results, 25)
-            dict_["sd"] = np.std(results)
-            dict_["mean"] = np.mean(results)
-            dict_["sd_as_percent_of_mean"] = dict_["sd"] / dict_["mean"] if dict_["mean"] != 0 else 0
+            dict_["min"] = np.log10(np.min(linear_results)) if np.min(linear_results) > 0 else 0
+            dict_["max"] = np.log10(np.max(linear_results)) if np.max(linear_results) > 0 else 0
+            dict_["median"] = np.log10(np.median(linear_results)) if np.median(linear_results) > 0 else 0
+            dict_["mean"] = np.log10(np.mean(linear_results)) if np.mean(linear_results) > 0 else 0
+
+            dict_["iqr"] = np.percentile(log_results, 75) - np.percentile(log_results, 25)
+            dict_["sd"] = np.std(log_results)
+            dict_["sd_as_percent_of_mean"] = dict_["sd"] / np.mean(log_results) if np.mean(log_results) != 0 else 0
             dict_["ensemble_id"] = value[0]
             dict_["metabolite_id"] = value[1]
+
             new_key = (value[0], value[1])
             per_gene_combination_results[new_key] = dict_
 
@@ -273,67 +307,3 @@ if __name__ == '__main__':
     missing_df = pd.DataFrame({"missing_genes": unique_not_in_sequence_df, "missing_SMILES": unique_not_in_smiles_df})
     missing_df.to_csv(os.path.join(combinations_output_location, "missing_genes_and_SMILES.csv"))
 
-
-    # the below will be performed in chunks
-
-    # seq_tensors_large = np.ndarray((len(gene_smiles_reactions_dict)*amount_of_times_to_multiply_smiles, second_dim))
-    # smiles_tensors_large = np.ndarray((len(gene_smiles_reactions_dict)*amount_of_times_to_multiply_smiles, second_dim))
-    #
-    # for idx, (key, value) in enumerate(gene_smiles_reactions_dict.items()):
-    #     gene = value[0]
-    #     metabolite = value[1]
-    #     if gene not in sequence_df["ensemble_id"].values:
-    #         print(f"gene not in sequence_df: {gene}")
-    #         not_in_sequence_df.append(gene)
-    #         continue
-    #     gene_index_in_seq_df = sequence_df[sequence_df["ensemble_id"] == gene].index[0]
-    #     if metabolite not in SMILES_df["id"].values:
-    #         print(f"smiles not in SMILES_df: {metabolite}")
-    #         not_in_smiles_df.append(metabolite)
-    #         continue
-    #     smiles_index_in_smiles_df = SMILES_df[SMILES_df["id"] ==metabolite].index[0]
-    #     smiles = SMILES_df[SMILES_df["id"] == metabolite][type_of_SMILES].values[0]
-    #     gene = sequence_df[sequence_df["ensemble_id"] == gene]["protein_sequence"].values[0]
-    #     # now use the unique positions to grab the correct tensors
-    #     gene_seq_tensor = seq_vec[gene_index_in_seq_df*amount_of_times_to_multiply_smiles:((gene_index_in_seq_df + 1)*amount_of_times_to_multiply_smiles)]
-    #     smiles_unique_positions = unique_smiles_positions[smiles]
-    #     smiles_tensor = smiles_vec[smiles_unique_positions[0]:smiles_unique_positions[1]]
-    #     seq_tensors_large[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)] = gene_seq_tensor
-    #     smiles_tensors_large[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)] = smiles_tensor
-    #
-    # unique_not_in_sequence_df = list(set(not_in_sequence_df))
-    # unique_not_in_smiles_df = list(set(not_in_smiles_df))
-    #
-    # fused_vectors = np.concatenate((smiles_tensors_large, seq_tensors_large), axis=1)
-    #
-    # # For kcat
-    # with open('UniKP20kcat.pkl', "rb") as f:
-    #     model = pickle.load(f)
-    #
-    # Pre_label = model.predict(fused_vectors)
-    #
-    # # condense the results such that we get per unique smiles the min max median iqr sd mean
-    # # for the kcat values
-
-    # per_gene_combination_results = {}
-    # for idx, value in enumerate(gene_smiles_reactions_dict.values()):
-    #     # in sets of amounht_of_times_to_multiply_smiles
-    #     results = Pre_label[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)]
-    #     dict_ = {}
-    #     dict_["min"] = np.min(results)
-    #     dict_["max"] = np.max(results)
-    #     dict_["median"] = np.median(results)
-    #     dict_["iqr"] = np.percentile(results, 75) - np.percentile(results, 25)
-    #     dict_["sd"] = np.std(results)
-    #     dict_["mean"] = np.mean(results)
-    #     per_gene_combination_results[value] = dict_
-    #
-    # per_gene_combination_results = {str(key): value for key, value in per_gene_combination_results.items()}
-    # # save the results
-    # with open(os.path.join(combinations_output_location, "per_gene_combination_results.json"), "w") as f:
-    #     json.dump(per_gene_combination_results, f)
-    # # create df
-    # df = pd.DataFrame(per_gene_combination_results).T
-    # df.to_csv(os.path.join(combinations_output_location, "per_gene_combination_results.csv"))
-    #
-    #
