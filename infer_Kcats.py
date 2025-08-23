@@ -119,6 +119,9 @@ if __name__ == '__main__':
     # todo make this production-grade code
 
     #### IMPORTANT ####
+    # todo clean up, comment code, integrate into SWaPAM pipeline
+    # todo rename files to represent what they do (gene-smiles-reaction pairs do not have SMILES)
+    #    AA and smiles sequences.py do not do either , but only create json files with gene-metabolite pairs
     # This script requires specific scikit version which only works (verified with) python 3.8
 
     # In addition, it requires three files to be available:
@@ -127,7 +130,10 @@ if __name__ == '__main__':
     #   - gene_smiles_reactions_pairs.json (contains the gene-metabolite pairs to infer kcats for)
 
     # These files can be created with some of the metabolic task score preprocessing scripts
-    # and will be made available/adapted for SWaPAM
+    # and will be made available/adapted for SWaPAM > specifically the files necessary are:
+    #  - smiles_getters.py (creates the final_SMILES_metabolite_df.csv)
+    #  - transcript_getters.py (creates the final_transcript_sequence_df.csv)
+    #  - preprocess_AA_and_SMILES_sequences.py (creates the gene_smiles_reactions_pairs.json)
 
     # Running this script will create the following files:
     #   - protein_sequence_tensors.pkl (contains the tensors for the sequences and can be reused)
