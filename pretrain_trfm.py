@@ -49,7 +49,9 @@ class TrfmSeq2seq(nn.Module):
         self.embed = nn.Embedding(in_size, hidden_size)
         self.pe = PositionalEncoding(hidden_size, dropout)
         self.trfm = nn.Transformer(d_model=hidden_size, nhead=4, 
-        num_encoder_layers=n_layers, num_decoder_layers=n_layers, dim_feedforward=hidden_size)
+        num_encoder_layers=n_layers, num_decoder_layers=n_layers, dim_feedforward=hidden_size,
+                                   # batch_first=True # edited to TRUE by JELLE BONTHUIS
+                                   )
         self.out = nn.Linear(hidden_size, out_size)
 
     def forward(self, src):
