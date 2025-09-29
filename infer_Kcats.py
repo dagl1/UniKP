@@ -142,7 +142,12 @@ if __name__ == '__main__':
     #   - final_per_gene_combination_results.json/csv (final results with statistics)
     #   - missing_genes_and_SMILES.csv (list of genes and SMILES that were not found in the input files)
     ####################
-    
+
+    # If you reveive a torch import error you must navigate to the unikp submodule, and activate ITS .venv
+        # this should be the venv for python 3.8 and here you can manually install (through terminal)
+        #  python -m pip install torch==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+        #  python -m pip install torchvision==0.19.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+        #  python -m pip install torchaudio==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
     ### Options and file paths
     # Multiple predictions are made by multiplying SMILES, later on the statistics are created
     # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
