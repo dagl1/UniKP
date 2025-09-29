@@ -147,14 +147,21 @@ if __name__ == '__main__':
     # Multiple predictions are made by multiplying SMILES, later on the statistics are created
     # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
     amount_of_times_to_multiply_smiles = 50
-    combinations_output_location = r"C:\Git\Metabolic_Task_Score\Data\Main_files\For_running\combinations\HumanGem17_DCM_test_metabolic_tasks_2024_v1_01"
+    combinations_output_location = r"C:\Users\MACSBIO-metabolic\git\SWAMP\data\for_SWaPAM\combinations\model_inhouse_v7_DCM_test_metabolic_tasks_2024_v1_01"
     type_of_SMILES = 'isomeric SMILES' # seems to be what UniKP uses
 
     ### File loading
-    SMILES_df = pd.read_csv(
-        os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"))
+    try:
+        SMILES_df = pd.read_csv(
+            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"))
+    except:
+        SMILES_df = pd.read_csv(
+            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"), sep =";")
     sequence_df = pd.read_csv(
         os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"))
+    if len(sequence_df.columns) <2:
+        sequence_df = pd.read_csv(
+            os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"), ";")
     with open(os.path.join(combinations_output_location, "gene_smiles_reactions_pairs.json"), "r") as f:
         gene_smiles_reactions_dict = json.load(f)
 
