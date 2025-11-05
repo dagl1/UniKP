@@ -1,23 +1,22 @@
+import gc
+import json
+import math
+import pickle
+import random
+import re
+
+import numpy as np
+import pandas as pd
 import torch
 from build_vocab import WordVocab
 from pretrain_trfm import TrfmSeq2seq
-from utils import split
-import json
-from transformers import T5EncoderModel, T5Tokenizer
-import re
-import gc
 from sklearn import metrics
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.linear_model import LinearRegression
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.metrics import r2_score
-from sklearn.model_selection import train_test_split
-import random
-import pickle
-import math
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, train_test_split
+from transformers import T5EncoderModel, T5Tokenizer
+from utils import split
 
 
 def smiles_to_vec(Smiles):
@@ -26,28 +25,31 @@ def smiles_to_vec(Smiles):
     eos_index = 2
     sos_index = 3
     mask_index = 4
-    vocab = WordVocab.load_vocab('vocab.pkl')
+    vocab = WordVocab.load_vocab("vocab.pkl")
+
     def get_inputs(sm):
         seq_len = 220
         sm = sm.split()
-        if len(sm)>218:
-            print('SMILES is too long ({:d})'.format(len(sm)))
-            sm = sm[:109]+sm[-109:]
+        if len(sm) > 218:
+            print("SMILES is too long ({:d})".format(len(sm)))
+            sm = sm[:109] + sm[-109:]
         ids = [vocab.stoi.get(token, unk_index) for token in sm]
         ids = [sos_index] + ids + [eos_index]
-        seg = [1]*len(ids)
-        padding = [pad_index]*(seq_len - len(ids))
+        seg = [1] * len(ids)
+        padding = [pad_index] * (seq_len - len(ids))
         ids.extend(padding), seg.extend(padding)
         return ids, seg
+
     def get_array(smiles):
         x_id, x_seg = [], []
         for sm in smiles:
-            a,b = get_inputs(sm)
+            a, b = get_inputs(sm)
             x_id.append(a)
             x_seg.append(b)
         return torch.tensor(x_id), torch.tensor(x_seg)
+
     trfm = TrfmSeq2seq(len(vocab), 256, len(vocab), 4)
-    trfm.load_state_dict(torch.load('trfm_12_23000.pkl'))
+    trfm.load_state_dict(torch.load("trfm_12_23000.pkl"))
     trfm.eval()
     x_split = [split(sm) for sm in Smiles]
     xid, xseg = get_array(x_split)
@@ -61,9 +63,9 @@ def Seq_to_vec(Sequence):
             Sequence[i] = Sequence[i][:500] + Sequence[i][-500:]
     sequences_Example = []
     for i in range(len(Sequence)):
-        zj = ''
+        zj = ""
         for j in range(len(Sequence[i]) - 1):
-            zj += Sequence[i][j] + ' '
+            zj += Sequence[i][j] + " "
         zj += Sequence[i][-1]
         sequences_Example.append(zj)
     tokenizer = T5Tokenizer.from_pretrained("prot_t5_xl_uniref50", do_lower_case=False)
@@ -71,23 +73,25 @@ def Seq_to_vec(Sequence):
     gc.collect()
     print(torch.cuda.is_available())
     # 'cuda:0' if torch.cuda.is_available() else
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model = model.eval()
     features = []
     for i in range(len(sequences_Example)):
-        print('For sequence ', str(i+1))
+        print("For sequence ", str(i + 1))
         sequences_Example_i = sequences_Example[i]
         sequences_Example_i = [re.sub(r"[UZOB]", "X", sequences_Example_i)]
-        ids = tokenizer.batch_encode_plus(sequences_Example_i, add_special_tokens=True, padding=True)
-        input_ids = torch.tensor(ids['input_ids']).to(device)
-        attention_mask = torch.tensor(ids['attention_mask']).to(device)
+        ids = tokenizer.batch_encode_plus(
+            sequences_Example_i, add_special_tokens=True, padding=True
+        )
+        input_ids = torch.tensor(ids["input_ids"]).to(device)
+        attention_mask = torch.tensor(ids["attention_mask"]).to(device)
         with torch.no_grad():
             embedding = model(input_ids=input_ids, attention_mask=attention_mask)
         embedding = embedding.last_hidden_state.cpu().numpy()
         for seq_num in range(len(embedding)):
             seq_len = (attention_mask[seq_num] == 1).sum()
-            seq_emd = embedding[seq_num][:seq_len - 1]
+            seq_emd = embedding[seq_num][: seq_len - 1]
             features.append(seq_emd)
     features_normalize = np.zeros([len(features), len(features[0][0])], dtype=float)
     for i in range(len(features)):
@@ -100,12 +104,14 @@ def Seq_to_vec(Sequence):
 
 def Kcat_predict(feature, pH, sequence, smiles, Label):
     # Generate index
-    Train_Validation_index = random.sample(range(len(feature)), int(len(feature)*0.8))
+    Train_Validation_index = random.sample(range(len(feature)), int(len(feature) * 0.8))
     Test_index = []
     for i in range(len(feature)):
         if i not in Train_Validation_index:
             Test_index.append(i)
-    Validation_index = random.sample(Train_Validation_index, int(len(Train_Validation_index)*0.2))
+    Validation_index = random.sample(
+        Train_Validation_index, int(len(Train_Validation_index) * 0.2)
+    )
     Train_index = []
     for i in range(len(feature)):
         if i not in Validation_index and i not in Test_index:
@@ -131,8 +137,12 @@ def Kcat_predict(feature, pH, sequence, smiles, Label):
     # Second model
     with open("PreKcat_new/0_model.pkl", "rb") as f:
         model_base = pickle.load(f)
-    Kcat_baseline = model_base.predict(feature[Validation_index]).reshape([len(Validation_index), 1])
-    model_1_2_input = np.concatenate((feature[Validation_index], pH[Validation_index]), axis=1)
+    Kcat_baseline = model_base.predict(feature[Validation_index]).reshape(
+        [len(Validation_index), 1]
+    )
+    model_1_2_input = np.concatenate(
+        (feature[Validation_index], pH[Validation_index]), axis=1
+    )
     Kcat_calibrated = model_first.predict(model_1_2_input).reshape([len(Validation_index), 1])
     kcat_fused = np.concatenate((Kcat_baseline, Kcat_calibrated), axis=1)
     model_second = LinearRegression()
@@ -149,20 +159,24 @@ def Kcat_predict(feature, pH, sequence, smiles, Label):
     Kcat_calibrated_3 = np.array(Kcat_calibrated_3).reshape([len(feature)])
     print(Training_Validation_Test.shape)
     # save
-    res = pd.DataFrame({'Value': Label,
-                        'sequence': sequence,
-                        'smiles': smiles,
-                        'pH': pH,
-                        'Prediction_first_base': Kcat_baseline_3,
-                        'Prediction_first_pH': Kcat_calibrated_3,
-                        'Prediction_second': Predicted_value,
-                        'Training_Validation_Test': Training_Validation_Test})
-    res.to_excel('pH/s2_pH_Kcat.xlsx')
+    res = pd.DataFrame(
+        {
+            "Value": Label,
+            "sequence": sequence,
+            "smiles": smiles,
+            "pH": pH,
+            "Prediction_first_base": Kcat_baseline_3,
+            "Prediction_first_pH": Kcat_calibrated_3,
+            "Prediction_second": Predicted_value,
+            "Training_Validation_Test": Training_Validation_Test,
+        }
+    )
+    res.to_excel("pH/s2_pH_Kcat.xlsx")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Dataset Load
-    database = np.array(pd.read_excel('pH/Generated_pH_unified_smiles_636.xlsx')).T
+    database = np.array(pd.read_excel("pH/Generated_pH_unified_smiles_636.xlsx")).T
     sequence = database[1]
     smiles = database[3]
     pH = database[5]

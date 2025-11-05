@@ -1,15 +1,16 @@
+import gc
+import json
+import os
+import pickle
+import re
+
+import numpy as np
+import pandas as pd
 import torch
 from build_vocab import WordVocab
 from pretrain_trfm import TrfmSeq2seq
-from utils import split
 from transformers import T5EncoderModel, T5Tokenizer
-import re
-import gc
-import numpy as np
-import pandas as pd
-import pickle
-import json
-import os
+from utils import split
 
 
 def smiles_to_vec(Smiles):
@@ -18,13 +19,13 @@ def smiles_to_vec(Smiles):
     eos_index = 2
     sos_index = 3
     mask_index = 4
-    vocab = WordVocab.load_vocab('vocab.pkl')
+    vocab = WordVocab.load_vocab("vocab.pkl")
 
     def get_inputs(sm):
         seq_len = 220
         sm = sm.split()
         if len(sm) > 218:
-            print('SMILES is too long ({:d})'.format(len(sm)))
+            print("SMILES is too long ({:d})".format(len(sm)))
             sm = sm[:109] + sm[-109:]
         ids = [vocab.stoi.get(token, unk_index) for token in sm]
         ids = [sos_index] + ids + [eos_index]
@@ -44,14 +45,13 @@ def smiles_to_vec(Smiles):
     trfm = TrfmSeq2seq(len(vocab), 256, len(vocab), 4)
     # trfm.load_state_dict(torch.load('trfm_12_23000.pkl'))
     # Modified by JELLE BONTHUIS on 2025-03-20 as the original code was not working
-        # for GPU only
-    trfm.load_state_dict(
-        torch.load('trfm_12_23000.pkl', map_location=torch.device('cpu')))
+    # for GPU only
+    trfm.load_state_dict(torch.load("trfm_12_23000.pkl", map_location=torch.device("cpu")))
     trfm.eval()
     try:
         x_split = []
         for idx, sm in enumerate(Smiles):
-            if sm == 'nan' or isinstance(sm, float):
+            if sm == "nan" or isinstance(sm, float):
                 x_split.append("")
                 continue
             x_split.append(split(sm))
@@ -72,9 +72,9 @@ def Seq_to_vec(Sequence):
             Sequence[i] = Sequence[i][:500] + Sequence[i][-500:]
     sequences_Example = []
     for i in range(len(Sequence)):
-        zj = ''
+        zj = ""
         for j in range(len(Sequence[i]) - 1):
-            zj += Sequence[i][j] + ' '
+            zj += Sequence[i][j] + " "
         zj += Sequence[i][-1]
         sequences_Example.append(zj)
     ###### you should place downloaded model into this directory.
@@ -82,28 +82,29 @@ def Seq_to_vec(Sequence):
     model = T5EncoderModel.from_pretrained("prot_t5_xl_uniref50")
     gc.collect()
     # 'cuda:0' if torch.cuda.is_available() else
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model = model.eval()
     features = []
     for i in range(len(sequences_Example)):
-        print('For sequence ', str(i + 1))
+        print("For sequence ", str(i + 1))
         sequences_Example_i = sequences_Example[i]
         try:
             sequences_Example_i = [re.sub(r"[UZOB]", "X", sequences_Example_i)]
-            ids = tokenizer.batch_encode_plus(sequences_Example_i, add_special_tokens=True,
-                                              padding=True)
-            input_ids = torch.tensor(ids['input_ids']).to(device)
-            attention_mask = torch.tensor(ids['attention_mask']).to(device)
+            ids = tokenizer.batch_encode_plus(
+                sequences_Example_i, add_special_tokens=True, padding=True
+            )
+            input_ids = torch.tensor(ids["input_ids"]).to(device)
+            attention_mask = torch.tensor(ids["attention_mask"]).to(device)
             with torch.no_grad():
                 embedding = model(input_ids=input_ids, attention_mask=attention_mask)
             embedding = embedding.last_hidden_state.cpu().numpy()
             for seq_num in range(len(embedding)):
                 seq_len = (attention_mask[seq_num] == 1).sum()
-                seq_emd = embedding[seq_num][:seq_len - 1]
+                seq_emd = embedding[seq_num][: seq_len - 1]
                 features.append(seq_emd)
         except Exception as e:
-            print(f'Error: for sequence number {i}: {sequences_Example_i}\n', e)
+            print(f"Error: for sequence number {i}: {sequences_Example_i}\n", e)
 
     features_normalize = np.zeros([len(features), len(features[0][0])], dtype=float)
     for i in range(len(features)):
@@ -114,7 +115,7 @@ def Seq_to_vec(Sequence):
     return features_normalize
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # todo add checks that this runs correctly and all files exist etc.
     # todo make this production-grade code
 
@@ -144,49 +145,62 @@ if __name__ == '__main__':
     ####################
 
     # If you reveive a torch import error you must navigate to the unikp submodule, and activate ITS .venv
-        # this should be the venv for python 3.8 and here you can manually install (through terminal)
-        #  python -m pip install torch==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-        #  python -m pip install torchvision==0.19.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-        #  python -m pip install torchaudio==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+    # this should be the venv for python 3.8 and here you can manually install (through terminal)
+    #  python -m pip install torch==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+    #  python -m pip install torchvision==0.19.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+    #  python -m pip install torchaudio==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
     ### Options and file paths
     # Multiple predictions are made by multiplying SMILES, later on the statistics are created
     # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
     amount_of_times_to_multiply_smiles = 50
     combinations_output_location = r"C:\Users\MACSBIO-metabolic\git\SWAMP\data\for_SWaPAM\combinations\model_inhouse_v7_DCM_test_metabolic_tasks_2024_v1_01"
-    type_of_SMILES = 'isomeric SMILES' # seems to be what UniKP uses
+    type_of_SMILES = "isomeric SMILES"  # seems to be what UniKP uses
 
     ### File loading
     try:
         SMILES_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"))
+            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv")
+        )
     except:
         SMILES_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"), sep =";")
+            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"),
+            sep=";",
+        )
     sequence_df = pd.read_csv(
-        os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"))
-    if len(sequence_df.columns) <2:
+        os.path.join(combinations_output_location, "final_transcript_sequence_df.csv")
+    )
+    if len(sequence_df.columns) < 2:
         sequence_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"), ";")
-    with open(os.path.join(combinations_output_location, "gene_smiles_reactions_pairs.json"), "r") as f:
+            os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"),
+            ";",
+        )
+    with open(
+        os.path.join(combinations_output_location, "gene_smiles_reactions_pairs.json"), "r"
+    ) as f:
         gene_smiles_reactions_dict = json.load(f)
-
 
     # Create or load tensors
     sequences = sequence_df["protein_sequence"].values.tolist()
     sequences = sequences
-    if not os.path.exists(os.path.join(combinations_output_location, f"protein_sequence_tensors.pkl")):
+    if not os.path.exists(
+        os.path.join(combinations_output_location, "protein_sequence_tensors.pkl")
+    ):
         print("Creating protein sequence tensors")
         seq_vec = Seq_to_vec(sequences)
-        with open(os.path.join(combinations_output_location, f"protein_sequence_tensors.pkl"),
-                "wb") as f:
+        with open(
+            os.path.join(combinations_output_location, "protein_sequence_tensors.pkl"), "wb"
+        ) as f:
             pickle.dump(seq_vec, f)
     else:
-        with open(os.path.join(combinations_output_location, f"protein_sequence_tensors.pkl"),
-                "rb") as f:
+        with open(
+            os.path.join(combinations_output_location, "protein_sequence_tensors.pkl"), "rb"
+        ) as f:
             seq_vec = pickle.load(f)
 
     # create duplicates of the sequence tensors if needed
-    seq_vec = np.array([seq.copy() for seq in seq_vec for i in range(amount_of_times_to_multiply_smiles)])
+    seq_vec = np.array(
+        [seq.copy() for seq in seq_vec for i in range(amount_of_times_to_multiply_smiles)]
+    )
     smiles_ = SMILES_df[type_of_SMILES].values.tolist()
     smiles_unique = []
     for smiles in smiles_:
@@ -194,20 +208,36 @@ if __name__ == '__main__':
             smiles_unique.append(smiles)
 
     smiles_unique = smiles_unique
-    smiles = [item for item in smiles_unique for i in range(amount_of_times_to_multiply_smiles)]
-    if not os.path.exists(os.path.join(combinations_output_location, f"SMILES_tensors.pkl")):
+    smiles = [
+        item for item in smiles_unique for i in range(amount_of_times_to_multiply_smiles)
+    ]
+    if not os.path.exists(os.path.join(combinations_output_location, "SMILES_tensors.pkl")):
         print("Creating SMILES tensors")
         smiles_vec = smiles_to_vec(smiles)
-        with open(os.path.join(combinations_output_location, f"SMILES_tensors.pkl"),
-                "wb") as f:
+        with open(
+            os.path.join(combinations_output_location, "SMILES_tensors.pkl"), "wb"
+        ) as f:
             pickle.dump(smiles_vec, f)
     else:
-        with open(os.path.join(combinations_output_location, f"SMILES_tensors.pkl"),
-                "rb") as f:
+        with open(
+            os.path.join(combinations_output_location, "SMILES_tensors.pkl"), "rb"
+        ) as f:
             smiles_vec = pickle.load(f)
 
-    unique_smiles_positions = {smiles: (i*amount_of_times_to_multiply_smiles, ((i + 1)* amount_of_times_to_multiply_smiles)) for i, smiles in enumerate(smiles_unique)}
-    unique_sequences_positions = {sequence: (i*amount_of_times_to_multiply_smiles, ((i + 1)* amount_of_times_to_multiply_smiles)) for i, sequence in enumerate(sequences)}
+    unique_smiles_positions = {
+        smiles: (
+            i * amount_of_times_to_multiply_smiles,
+            ((i + 1) * amount_of_times_to_multiply_smiles),
+        )
+        for i, smiles in enumerate(smiles_unique)
+    }
+    unique_sequences_positions = {
+        sequence: (
+            i * amount_of_times_to_multiply_smiles,
+            ((i + 1) * amount_of_times_to_multiply_smiles),
+        )
+        for i, sequence in enumerate(sequences)
+    }
 
     not_in_sequence_df = []
     not_in_smiles_df = []
@@ -220,9 +250,11 @@ if __name__ == '__main__':
     # set chunk size to be the minimally a full amount_of_times_to_multiply_smiles
     chunk_size = amount_of_things_to_check // chunk_amount
     if chunk_size % amount_of_times_to_multiply_smiles != 0:
-        chunk_size = (chunk_size // amount_of_times_to_multiply_smiles) * amount_of_times_to_multiply_smiles
+        chunk_size = (
+            chunk_size // amount_of_times_to_multiply_smiles
+        ) * amount_of_times_to_multiply_smiles
         chunk_amount += 1
-    with open('UniKP20kcat.pkl', "rb") as f:
+    with open("UniKP20kcat.pkl", "rb") as f:
         model = pickle.load(f)
 
     final_per_gene_combination_results = {}
@@ -232,7 +264,9 @@ if __name__ == '__main__':
         end = (chunk + 1) * chunk_size // amount_of_times_to_multiply_smiles
         seq_tensors_large = np.ndarray((chunk_size, second_dim))
         smiles_tensors_large = np.ndarray((chunk_size, second_dim))
-        for idx, (key, value) in enumerate(list(gene_smiles_reactions_dict.items())[start:end]):
+        for idx, (key, value) in enumerate(
+            list(gene_smiles_reactions_dict.items())[start:end]
+        ):
             gene_id = value[0]
             metabolite = value[1]
             if gene_id not in sequence_df["ensemble_id"].values:
@@ -244,16 +278,32 @@ if __name__ == '__main__':
                 print(f"smiles not in SMILES_df: {metabolite}")
                 not_in_smiles_df.append(metabolite)
                 continue
-            smiles_index_in_smiles_df = SMILES_df[SMILES_df["id"] ==metabolite].index[0]
+            smiles_index_in_smiles_df = SMILES_df[SMILES_df["id"] == metabolite].index[0]
             smiles = SMILES_df[SMILES_df["id"] == metabolite][type_of_SMILES].values[0]
-            gene = sequence_df[sequence_df["ensemble_id"] == gene_id]["protein_sequence"].values[0]
+            gene = sequence_df[sequence_df["ensemble_id"] == gene_id][
+                "protein_sequence"
+            ].values[0]
             # now use the unique positions to grab the correct tensors
-            gene_seq_tensor = seq_vec[gene_index_in_seq_df*amount_of_times_to_multiply_smiles:((gene_index_in_seq_df + 1)*amount_of_times_to_multiply_smiles)]
+            gene_seq_tensor = seq_vec[
+                gene_index_in_seq_df * amount_of_times_to_multiply_smiles : (
+                    (gene_index_in_seq_df + 1) * amount_of_times_to_multiply_smiles
+                )
+            ]
             smiles_unique_positions = unique_smiles_positions[smiles]
-            smiles_tensor = smiles_vec[smiles_unique_positions[0]:smiles_unique_positions[1]]
+            smiles_tensor = smiles_vec[
+                smiles_unique_positions[0] : smiles_unique_positions[1]
+            ]
 
-            seq_tensors_large[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)] = gene_seq_tensor
-            smiles_tensors_large[idx*amount_of_times_to_multiply_smiles:((idx + 1)*amount_of_times_to_multiply_smiles)] = smiles_tensor
+            seq_tensors_large[
+                idx * amount_of_times_to_multiply_smiles : (
+                    (idx + 1) * amount_of_times_to_multiply_smiles
+                )
+            ] = gene_seq_tensor
+            smiles_tensors_large[
+                idx * amount_of_times_to_multiply_smiles : (
+                    (idx + 1) * amount_of_times_to_multiply_smiles
+                )
+            ] = smiles_tensor
 
         fused_vectors = np.concatenate((smiles_tensors_large, seq_tensors_large), axis=1)
         Pre_label = model.predict(fused_vectors)
@@ -261,22 +311,33 @@ if __name__ == '__main__':
         for idx, value in enumerate(list(gene_smiles_reactions_dict.values())[start:end]):
             # in sets of amounht_of_times_to_multiply_smiles
             log_results = Pre_label[
-                          idx*amount_of_times_to_multiply_smiles:
-                          ((idx + 1)*amount_of_times_to_multiply_smiles)
-                          ]
+                idx * amount_of_times_to_multiply_smiles : (
+                    (idx + 1) * amount_of_times_to_multiply_smiles
+                )
+            ]
             # since data is in log scale, we need to convert it back to normal scale for statistics
             # then convert those back to log scale
             linear_results = np.array([10**x for x in log_results])
 
             dict_ = {}
-            dict_["min"] = np.log10(np.min(linear_results)) if np.min(linear_results) > 0 else 0
-            dict_["max"] = np.log10(np.max(linear_results)) if np.max(linear_results) > 0 else 0
-            dict_["median"] = np.log10(np.median(linear_results)) if np.median(linear_results) > 0 else 0
-            dict_["mean"] = np.log10(np.mean(linear_results)) if np.mean(linear_results) > 0 else 0
+            dict_["min"] = (
+                np.log10(np.min(linear_results)) if np.min(linear_results) > 0 else 0
+            )
+            dict_["max"] = (
+                np.log10(np.max(linear_results)) if np.max(linear_results) > 0 else 0
+            )
+            dict_["median"] = (
+                np.log10(np.median(linear_results)) if np.median(linear_results) > 0 else 0
+            )
+            dict_["mean"] = (
+                np.log10(np.mean(linear_results)) if np.mean(linear_results) > 0 else 0
+            )
 
             dict_["iqr"] = np.percentile(log_results, 75) - np.percentile(log_results, 25)
             dict_["sd"] = np.std(log_results)
-            dict_["sd_as_percent_of_mean"] = dict_["sd"] / np.mean(log_results) if np.mean(log_results) != 0 else 0
+            dict_["sd_as_percent_of_mean"] = (
+                dict_["sd"] / np.mean(log_results) if np.mean(log_results) != 0 else 0
+            )
             dict_["ensemble_id"] = value[0]
             dict_["metabolite_id"] = value[1]
 
@@ -284,19 +345,34 @@ if __name__ == '__main__':
             per_gene_combination_results[new_key] = dict_
 
         # save temporary results
-        per_gene_combination_results = {str(key): value for key, value in per_gene_combination_results.items()}
-        with open(os.path.join(combinations_output_location, f"per_gene_combination_results_{chunk}.json"), "w") as f:
+        per_gene_combination_results = {
+            str(key): value for key, value in per_gene_combination_results.items()
+        }
+        with open(
+            os.path.join(
+                combinations_output_location, f"per_gene_combination_results_{chunk}.json"
+            ),
+            "w",
+        ) as f:
             json.dump(per_gene_combination_results, f)
         # create df
         df = pd.DataFrame(per_gene_combination_results).T
-        df.to_csv(os.path.join(combinations_output_location, f"per_gene_combination_results_{chunk}.csv"))
+        df.to_csv(
+            os.path.join(
+                combinations_output_location, f"per_gene_combination_results_{chunk}.csv"
+            )
+        )
 
         final_per_gene_combination_results.update(per_gene_combination_results)
 
-    final_per_gene_combination_results = {str(key): value for key, value in final_per_gene_combination_results.items()}
-    with open(os.path.join(combinations_output_location, "final_per_gene_combination_results.json"), "w") as f:
-        json.dump(final_per_gene_combination_results , f)
-
+    final_per_gene_combination_results = {
+        str(key): value for key, value in final_per_gene_combination_results.items()
+    }
+    with open(
+        os.path.join(combinations_output_location, "final_per_gene_combination_results.json"),
+        "w",
+    ) as f:
+        json.dump(final_per_gene_combination_results, f)
 
     unique_not_in_sequence_df = list(set(not_in_sequence_df))
     unique_not_in_smiles_df = list(set(not_in_smiles_df))
@@ -305,7 +381,10 @@ if __name__ == '__main__':
     df["missing"] = False
     df["smiles_longer_than_218"] = False
     for idx, value in df.iterrows():
-        if value["ensemble_id"] in unique_not_in_sequence_df or value["metabolite_id"] in unique_not_in_smiles_df:
+        if (
+            value["ensemble_id"] in unique_not_in_sequence_df
+            or value["metabolite_id"] in unique_not_in_smiles_df
+        ):
             df.at[idx, "missing"] = True
         smiles = SMILES_df[SMILES_df["id"] == value["metabolite_id"]][type_of_SMILES].values
         if len(smiles) == 0:
@@ -315,13 +394,25 @@ if __name__ == '__main__':
         if not isinstance(smiles, float) and len(smiles.split()) > 218:
             df.at[idx, "smiles_longer_than_218"] = True
 
-    df.to_csv(os.path.join(combinations_output_location, "final_per_gene_combination_results.csv"))
-    #make same length
+    df.to_csv(
+        os.path.join(combinations_output_location, "final_per_gene_combination_results.csv")
+    )
+    # make same length
     if len(unique_not_in_sequence_df) < len(unique_not_in_smiles_df):
-        unique_not_in_sequence_df.extend([""]*(len(unique_not_in_smiles_df) - len(unique_not_in_sequence_df)))
+        unique_not_in_sequence_df.extend(
+            [""] * (len(unique_not_in_smiles_df) - len(unique_not_in_sequence_df))
+        )
     else:
-        unique_not_in_smiles_df.extend([""]*(len(unique_not_in_sequence_df) - len(unique_not_in_smiles_df)))
+        unique_not_in_smiles_df.extend(
+            [""] * (len(unique_not_in_sequence_df) - len(unique_not_in_smiles_df))
+        )
 
-    missing_df = pd.DataFrame({"missing_genes": unique_not_in_sequence_df, "missing_SMILES": unique_not_in_smiles_df})
-    missing_df.to_csv(os.path.join(combinations_output_location, "missing_genes_and_SMILES.csv"))
-
+    missing_df = pd.DataFrame(
+        {
+            "missing_genes": unique_not_in_sequence_df,
+            "missing_SMILES": unique_not_in_smiles_df,
+        }
+    )
+    missing_df.to_csv(
+        os.path.join(combinations_output_location, "missing_genes_and_SMILES.csv")
+    )
