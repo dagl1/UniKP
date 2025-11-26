@@ -140,7 +140,7 @@ if __name__ == "__main__":
     #   - protein_sequence_tensors.pkl (contains the tensors for the sequences and can be reused)
     #   - SMILES_tensors.pkl (contains the tensors for the SMILES and can be reused)
     #   - per_gene_combination_results_*.json/csv (intermediate results, can be deleted after running)
-    #   - final_per_gene_combination_results.json/csv (final results with statistics)
+    #   - final_kcat_per_gene_combination_results.json/csv (final results with statistics)
     #   - missing_genes_and_SMILES.csv (list of genes and SMILES that were not found in the input files)
     ####################
 
@@ -395,7 +395,9 @@ if __name__ == "__main__":
             df.at[idx, "smiles_longer_than_218"] = True
 
     df.to_csv(
-        os.path.join(combinations_output_location, "final_per_gene_combination_results.csv")
+        os.path.join(
+            combinations_output_location, "final_kcat_per_gene_combination_results.csv"
+        )
     )
     # make same length
     if len(unique_not_in_sequence_df) < len(unique_not_in_smiles_df):
