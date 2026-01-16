@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import pathlib as pl
 import pickle
 import re
 
@@ -153,48 +154,58 @@ if __name__ == "__main__":
     # Multiple predictions are made by multiplying SMILES, later on the statistics are created
     # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
     amount_of_times_to_multiply_smiles = 50
-    combinations_output_location = r"C:\Users\MACSBIO-metabolic\git\SWAMP\data\for_SWaPAM\combinations\model_inhouse_v7_DCM_test_metabolic_tasks_2024_v1_01"
+    # model_location = r"C:\Users\MACSBIO-metabolic\git\SWAMP\data\for_SWaPAM\combinations\model_inhouse_v7_DCM_test_metabolic_tasks_2024_v1_01"
+    model_location = pl.Path(r"C:\git\SWAPAM\data\for_SWAMP\models\model_inhouse_v7_human")
+    metabolite_file = "final_SMILES_metabolite_df.csv"
+    metabolite_file_path = model_location.joinpath(metabolite_file)
+    transcript_file = "final_transcript_sequence_df.csv"
+    transcript_file_path = model_location.joinpath(transcript_file)
+    gene_smiles_reactions_file = "gene_smiles_reactions_pairs.json"
+    gene_smiles_reactions_file_path = model_location.joinpath(gene_smiles_reactions_file)
+    protein_tensors_file = "protein_sequence_tensors.pkl"
+    smiles_tensors_file = "SMILES_tensors.pkl"
+    protein_tensors_file_path = model_location.joinpath(protein_tensors_file)
+    smiles_tensors_file_path = model_location.joinpath(smiles_tensors_file)
+    output_file = "final_kcat_per_gene_combination_results.json"
+    output_file_path = model_location.joinpath(output_file)
+    missing_file = "missing_genes_and_SMILES.csv"
+    missing_file_path = model_location.joinpath(missing_file)
     type_of_SMILES = "isomeric SMILES"  # seems to be what UniKP uses
 
     ### File loading
     try:
         SMILES_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv")
+            metabolite_file_path,
         )
     except:
         SMILES_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_SMILES_metabolite_df.csv"),
+            metabolite_file_path,
             sep=";",
         )
     sequence_df = pd.read_csv(
-        os.path.join(combinations_output_location, "final_transcript_sequence_df.csv")
+        transcript_file_path,
     )
     if len(sequence_df.columns) < 2:
         sequence_df = pd.read_csv(
-            os.path.join(combinations_output_location, "final_transcript_sequence_df.csv"),
-            ";",
+            transcript_file_path,
+            sep=";",
         )
-    with open(
-        os.path.join(combinations_output_location, "gene_smiles_reactions_pairs.json"), "r"
-    ) as f:
+    with open(gene_smiles_reactions_file_path, "r") as f:
         gene_smiles_reactions_dict = json.load(f)
 
     # Create or load tensors
     sequences = sequence_df["protein_sequence"].values.tolist()
-    sequences = sequences
-    if not os.path.exists(
-        os.path.join(combinations_output_location, "protein_sequence_tensors.pkl")
-    ):
+    sequences = sequences[:40]
+    # todo make this a dictionary so we can check which ones we have already done before at a
+    #  specific amount of times to multiply. Especially important for our
+    if not protein_tensors_file_path.exists():
         print("Creating protein sequence tensors")
+
         seq_vec = Seq_to_vec(sequences)
-        with open(
-            os.path.join(combinations_output_location, "protein_sequence_tensors.pkl"), "wb"
-        ) as f:
+        with open(protein_tensors_file_path, "wb") as f:
             pickle.dump(seq_vec, f)
     else:
-        with open(
-            os.path.join(combinations_output_location, "protein_sequence_tensors.pkl"), "rb"
-        ) as f:
+        with open(protein_tensors_file_path, "rb") as f:
             seq_vec = pickle.load(f)
 
     # create duplicates of the sequence tensors if needed
@@ -211,17 +222,13 @@ if __name__ == "__main__":
     smiles = [
         item for item in smiles_unique for i in range(amount_of_times_to_multiply_smiles)
     ]
-    if not os.path.exists(os.path.join(combinations_output_location, "SMILES_tensors.pkl")):
+    if not smiles_tensors_file_path.exists():
         print("Creating SMILES tensors")
         smiles_vec = smiles_to_vec(smiles)
-        with open(
-            os.path.join(combinations_output_location, "SMILES_tensors.pkl"), "wb"
-        ) as f:
+        with open(smiles_tensors_file_path, "wb") as f:
             pickle.dump(smiles_vec, f)
     else:
-        with open(
-            os.path.join(combinations_output_location, "SMILES_tensors.pkl"), "rb"
-        ) as f:
+        with open(smiles_tensors_file_path, "rb") as f:
             smiles_vec = pickle.load(f)
 
     unique_smiles_positions = {
@@ -349,19 +356,13 @@ if __name__ == "__main__":
             str(key): value for key, value in per_gene_combination_results.items()
         }
         with open(
-            os.path.join(
-                combinations_output_location, f"per_gene_combination_results_{chunk}.json"
-            ),
+            os.path.join(model_location, f"per_gene_combination_results_{chunk}.json"),
             "w",
         ) as f:
             json.dump(per_gene_combination_results, f)
         # create df
         df = pd.DataFrame(per_gene_combination_results).T
-        df.to_csv(
-            os.path.join(
-                combinations_output_location, f"per_gene_combination_results_{chunk}.csv"
-            )
-        )
+        df.to_csv(os.path.join(model_location, f"per_gene_combination_results_{chunk}.csv"))
 
         final_per_gene_combination_results.update(per_gene_combination_results)
 
@@ -369,7 +370,7 @@ if __name__ == "__main__":
         str(key): value for key, value in final_per_gene_combination_results.items()
     }
     with open(
-        os.path.join(combinations_output_location, "final_per_gene_combination_results.json"),
+        os.path.join(model_location, "final_per_gene_combination_results.json"),
         "w",
     ) as f:
         json.dump(final_per_gene_combination_results, f)
@@ -394,11 +395,7 @@ if __name__ == "__main__":
         if not isinstance(smiles, float) and len(smiles.split()) > 218:
             df.at[idx, "smiles_longer_than_218"] = True
 
-    df.to_csv(
-        os.path.join(
-            combinations_output_location, "final_kcat_per_gene_combination_results.csv"
-        )
-    )
+    df.to_csv(output_file_path)
     # make same length
     if len(unique_not_in_sequence_df) < len(unique_not_in_smiles_df):
         unique_not_in_sequence_df.extend(
@@ -415,6 +412,4 @@ if __name__ == "__main__":
             "missing_SMILES": unique_not_in_smiles_df,
         }
     )
-    missing_df.to_csv(
-        os.path.join(combinations_output_location, "missing_genes_and_SMILES.csv")
-    )
+    missing_df.to_csv(missing_file_path)
