@@ -9,9 +9,12 @@ import numpy as np
 import pandas as pd
 import torch
 from build_vocab import WordVocab
+from compat_sklearn import safe_load_sklearn_model
 from pretrain_trfm import TrfmSeq2seq
 from transformers import T5EncoderModel, T5Tokenizer
 from utils import split
+
+from src.cobrapy_fork.io import load_json_model
 
 
 def smiles_to_vec(Smiles):
@@ -116,15 +119,37 @@ def Seq_to_vec(Sequence):
     return features_normalize
 
 
-if __name__ == "__main__":
-    # todo add checks that this runs correctly and all files exist etc.
-    # todo make this production-grade code
+def get_gene_substrate_pairs(cobra_model):
+    gene_smiles_reactions_dict = {}
+    for reaction in cobra_model.reactions:
+        if reaction.gene_reaction_rule != "":
+            for gene in reaction.genes:
+                for metabolite in reaction.metabolites:
+                    gene_smiles_reactions_dict[(gene.id, metabolite.id)] = (
+                        gene.id,
+                        metabolite.id,
+                    )
+    return gene_smiles_reactions_dict
 
-    #### IMPORTANT ####
-    # todo clean up, comment code, integrate into SWaPAM pipeline
+
+def get_gene_AA_sequences(cobra_model):
+    # utilise the sequence retrieval code from SWaPAM to get the AA sequences for the genes in the model
+    pass
+
+
+def get_metabolite_SMILES(cobra_model):
+    # utilise the SMILES retrieval code from SWaPAM to get the SMILES for the metabolites in the model
+    pass
+
+
+if __name__ == "__main__":
     # todo rename files to represent what they do (gene-smiles-reaction pairs do not have SMILES)
     #    AA and smiles sequences.py do not do either , but only create json files with gene-metabolite pairs
-    # This script requires specific scikit version which only works (verified with) python 3.8
+
+    # Requires Python 3.11+.
+    # The UniKP20kcat.pkl model was originally pickled with sklearn 0.24.2, but is loaded
+    # here via compat_sklearn.safe_load_sklearn_model which transparently patches the
+    # legacy node-array dtype and renamed attributes so any sklearn >= 1.3 works.
 
     # In addition, it requires three files to be available:
     #   - final_SMILES_metabolite_df.csv (contains the metabolites with SMILES)
@@ -145,17 +170,34 @@ if __name__ == "__main__":
     #   - missing_genes_and_SMILES.csv (list of genes and SMILES that were not found in the input files)
     ####################
 
-    # If you reveive a torch import error you must navigate to the unikp submodule, and activate ITS .venv
-    # this should be the venv for python 3.8 and here you can manually install (through terminal)
-    #  python -m pip install torch==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-    #  python -m pip install torchvision==0.19.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-    #  python -m pip install torchaudio==2.4.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+    # --- Dependencies ---
+    # Install the [unikp] optional group from the root pyproject.toml (recommended):
+    #   uv sync --extra unikp
+    #
+    # PyTorch CPU wheels are served from a separate index; uv resolves this automatically
+    # via the [[tool.uv.index]] entry in pyproject.toml. If you need to install manually:
+    #   uv pip install torch>=2.4.1 --index https://download.pytorch.org/whl/cpu
+    #
+    # Or with plain pip:
+    #   pip install torch>=2.4.1 --extra-index-url https://download.pytorch.org/whl/cpu
+
     ### Options and file paths
     # Multiple predictions are made by multiplying SMILES, later on the statistics are created
     # 50 seems to be fine, but can be adjusted (most computation time is not spend on this)
     amount_of_times_to_multiply_smiles = 50
     # model_location = r"C:\Users\MACSBIO-metabolic\git\SWAMP\data\for_SWaPAM\combinations\model_inhouse_v7_DCM_test_metabolic_tasks_2024_v1_01"
-    model_location = pl.Path(r"C:\git\SWAPAM\data\for_SWAMP\models\model_inhouse_v7_human")
+    model_location = pl.Path(r"C:\git\SWAPAM\data\for_SWAMP\models\model_inhouse_v9_human")
+    cobra_model_path = None
+    for file in os.listdir(model_location):
+        if file.startswith("model_") and file.endswith(".json"):
+            cobra_model_path = model_location.joinpath(file)
+            break
+
+    cobra_model_path = pl.Path(cobra_model_path)
+    cobra_model = load_json_model(cobra_model_path)
+
+    # functions to create the 3 necessary files:
+
     metabolite_file = "final_SMILES_metabolite_df.csv"
     metabolite_file_path = model_location.joinpath(metabolite_file)
     transcript_file = "final_transcript_sequence_df.csv"
@@ -171,6 +213,10 @@ if __name__ == "__main__":
     missing_file = "missing_genes_and_SMILES.csv"
     missing_file_path = model_location.joinpath(missing_file)
     type_of_SMILES = "isomeric SMILES"  # seems to be what UniKP uses
+
+    # todo add logic that checks whether any new gene-metabolite pairs have been added since
+    # and only run the inference for those such that we can easily update or use previously
+    # ran stuff
 
     ### File loading
     try:
@@ -195,7 +241,7 @@ if __name__ == "__main__":
 
     # Create or load tensors
     sequences = sequence_df["protein_sequence"].values.tolist()
-    sequences = sequences[:40]
+    # sequences = sequences[:40]
     # todo make this a dictionary so we can check which ones we have already done before at a
     #  specific amount of times to multiply. Especially important for our
     if not protein_tensors_file_path.exists():
@@ -261,8 +307,8 @@ if __name__ == "__main__":
             chunk_size // amount_of_times_to_multiply_smiles
         ) * amount_of_times_to_multiply_smiles
         chunk_amount += 1
-    with open("UniKP20kcat.pkl", "rb") as f:
-        model = pickle.load(f)
+    # Load model with sklearn version compatibility handling
+    model = safe_load_sklearn_model(pl.Path("UniKP20kcat.pkl"))
 
     final_per_gene_combination_results = {}
     for chunk in range(chunk_amount):
