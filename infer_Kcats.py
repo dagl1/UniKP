@@ -852,7 +852,7 @@ def run_kcat_inference(
         try:
             from UniKP.utils import split as _split_smiles
         except ModuleNotFoundError:
-            from utils import split as _split_smiles  # noqa: I001
+            from utils import split as _split_smiles  # noqa:  I001# ty: ignore[unresolved-import]
 
         for met_id, smiles in zip(
             smiles_pairs["id"].astype(str),
