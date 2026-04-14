@@ -3,6 +3,28 @@ import pickle
 from collections import Counter
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    """Unpickler that remaps legacy __main__ class references.
+
+    Some historical UniKP pickles were created while running build_vocab.py as
+    a script, so pickle stored class references as __main__.WordVocab / Vocab.
+    """
+
+    def find_class(self, module, name):
+        if module == "__main__" and name in {"WordVocab", "Vocab", "TorchVocab"}:
+            module = "UniKP.build_vocab"
+        return super().find_class(module, name)
+
+
+def _load_vocab_pickle(vocab_path: str):
+    with open(vocab_path, "rb") as f:
+        try:
+            return pickle.load(f)
+        except (AttributeError, ModuleNotFoundError):
+            f.seek(0)
+            return _CompatUnpickler(f).load()
+
+
 class TorchVocab(object):
     """
     :property freqs: collections.Counter, コーパス中の単語の出現頻度を保持するオブジェクト
@@ -97,7 +119,7 @@ class Vocab(TorchVocab):
         )
 
     # override用
-    def to_seq(self, sentece, seq_len, with_eos=False, with_sos=False) -> list:
+    def to_seq(self, sentece, seq_len, with_eos=False, with_sos=False) -> None:
         pass
 
     # override用
@@ -106,8 +128,7 @@ class Vocab(TorchVocab):
 
     @staticmethod
     def load_vocab(vocab_path: str) -> "Vocab":
-        with open(vocab_path, "rb") as f:
-            return pickle.load(f)
+        return _load_vocab_pickle(vocab_path)
 
     def save_vocab(self, vocab_path):
         with open(vocab_path, "wb") as f:
@@ -129,7 +150,14 @@ class WordVocab(Vocab):
                 counter[word] += 1
         super().__init__(counter, max_size=max_size, min_freq=min_freq)
 
-    def to_seq(self, sentence, seq_len=None, with_eos=False, with_sos=False, with_len=False):
+    def to_seq(
+        self,
+        sentence,
+        seq_len=None,
+        with_eos=False,
+        with_sos=False,
+        with_len=False,
+    ) -> tuple | list:
         if isinstance(sentence, str):
             sentence = sentence.split()
 
@@ -162,8 +190,7 @@ class WordVocab(Vocab):
 
     @staticmethod
     def load_vocab(vocab_path: str) -> "WordVocab":
-        with open(vocab_path, "rb") as f:
-            return pickle.load(f)
+        return _load_vocab_pickle(vocab_path)
 
 
 def main():
