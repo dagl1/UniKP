@@ -5,6 +5,7 @@ import gc
 import json
 import pickle
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -16,12 +17,51 @@ from pandas.errors import EmptyDataError
 from tqdm import tqdm
 from transformers import T5EncoderModel, T5Tokenizer
 
-from SWAMP.utils.file_handling import get_project_root
+# if python version is <3.11 we just create a dummy logger:
+if sys.version_info <= (3, 10):
 
-try:
-    from src.SWAMP.utils.custom_logging import CustomLogger
-except ModuleNotFoundError:
-    from SWAMP.utils.custom_logging import CustomLogger
+    class CustomLogger:  # pragma: no cover - compatibility shim for old Python
+        def __init__(self, _name: str, _log_dir: str, print_level: int = 2) -> None:
+            self._print_level = print_level
+
+        def set_print_level(self, print_level: int) -> None:
+            self._print_level = print_level
+
+        def set_log_files_location(self, _log_dir: str) -> None:
+            return
+
+        def _emit(self, prefix: str, message: str, print_level: int = 2) -> None:
+            if self._print_level >= print_level:
+                print(f"{prefix} - {message}")
+
+        def info(self, message: str, print_level: int = 2, *args, **kwargs) -> None:
+            self._emit("INFO", message, print_level=print_level)
+
+        def warning(self, message: str, print_level: int = 2, *args, **kwargs) -> None:
+            self._emit("WARNING", message, print_level=print_level)
+
+        def error(self, message: str, print_level: int = 1, *args, **kwargs) -> None:
+            self._emit("ERROR", message, print_level=print_level)
+
+        def valid(self, message: str, print_level: int = 2, *args, **kwargs) -> None:
+            self._emit("VALID", message, print_level=print_level)
+
+        def starting(self, message: str, print_level: int = 2, *args, **kwargs) -> None:
+            self._emit("STARTING", message, print_level=print_level)
+
+        def finished(self, message: str, print_level: int = 2, *args, **kwargs) -> None:
+            self._emit("FINISHED", message, print_level=print_level)
+
+    def get_project_root() -> Path:
+        return Path(__file__).resolve().parents[1]
+
+else:
+    from SWAMP.utils.file_handling import get_project_root
+
+    try:
+        from src.SWAMP.utils.custom_logging import CustomLogger
+    except ModuleNotFoundError:
+        from SWAMP.utils.custom_logging import CustomLogger
 
 try:
     from UniKP.compat_sklearn import safe_load_sklearn_model
@@ -133,14 +173,8 @@ def smiles_to_embedding(
         return torch.tensor(x_id), torch.tensor(x_seg)
 
     trfm = TrfmSeq2seq(len(vocab), 256, len(vocab), 4)
-    trfm.load_state_dict(
-        torch.load(
-            "trfm_12_23000.pkl",
-            map_location=torch.device("cpu"),
-            weights_only=True,
-        )
-    )
-    trfm.train()
+    trfm.load_state_dict(torch.load("trfm_12_23000.pkl", map_location=torch.device("cpu")))
+    trfm.eval()
 
     try:
         split_smiles = []
@@ -161,14 +195,12 @@ def smiles_to_embedding(
             print_level=print_level,
         )
 
-    replicate_embeddings = []
-    replicate_iterator = range(amount_of_replicates)
+    # Legacy parity: build one expanded batch with repeated SMILES and encode once.
+    # This matches how LEGACY_infer_Kcats generates stochastic replicate tensors.
+    expanded_xid = xid.repeat_interleave(amount_of_replicates, dim=0)
     with torch.no_grad():
-        for _ in replicate_iterator:
-            encoded = trfm.encode(torch.t(xid))
-            replicate_embeddings.append(np.asarray(encoded))
-
-    encoded = np.stack(replicate_embeddings, axis=1)
+        encoded_expanded = np.asarray(trfm.encode(torch.t(expanded_xid)))
+    encoded = encoded_expanded.reshape(len(smiles_list), amount_of_replicates, -1)
     if logger is not None and log_start:
         logger.valid("SMILES embedding generation complete", print_level=print_level)
     return encoded
@@ -528,18 +560,28 @@ def _update_embedding_cache(
     key_normalizer: Callable[[str], str] | None = None,
     batch_size: int = 50,
     save_every_batches: int = 1,
+    shared_cache_path: Path | None = None,
     logger: CustomLogger | None = None,
     print_level: int = 2,
 ) -> dict[str, np.ndarray]:
+    # Load shared cache first as baseline; local run cache overrides it.
+    shared_cache: dict[str, np.ndarray] = (
+        _load_cache(shared_cache_path) if shared_cache_path is not None else {}
+    )
     cache = _load_cache(cache_path)
+    # Merge: shared provides base, local run cache takes precedence.
+    merged: dict[str, np.ndarray] = {**shared_cache, **cache}
+
     normalizer = key_normalizer or (lambda v: v)
     normalized_values = list({normalizer(value) for value in values})
-    needed = [value for value in normalized_values if value not in cache]
-    request_hits = len(normalized_values) - len(needed)
+    needed = [value for value in normalized_values if value not in merged]
+    shared_hits = sum(1 for v in normalized_values if v in shared_cache and v not in cache)
+    local_hits = sum(1 for v in normalized_values if v in cache)
     if logger is not None:
         logger.info(
-            f"Cache {cache_path.name}: cache_entries_total={len(cache)}, "
-            f"request_unique={len(normalized_values)}, request_hits={request_hits}, "
+            f"Cache {cache_path.name}: cache_entries_total={len(merged)}, "
+            f"request_unique={len(normalized_values)}, "
+            f"local_hits={local_hits}, shared_hits={shared_hits}, "
             f"new_to_embed={len(needed)}",
             print_level=print_level,
         )
@@ -555,10 +597,14 @@ def _update_embedding_cache(
             if new_vectors is None:
                 raise RuntimeError(f"Could not create embeddings for {cache_path.name}")
             for idx, key in enumerate(needed_batch):
-                cache[key] = np.asarray(new_vectors[idx])
+                merged[key] = np.asarray(new_vectors[idx])
 
             if batch_idx % save_every_batches == 0 or batch_idx == len(needed_batches):
-                _save_cache(cache_path, cache)
+                # Write new entries to both local and shared cache.
+                _save_cache(cache_path, merged)
+                if shared_cache_path is not None:
+                    shared_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    _save_cache(shared_cache_path, merged)
 
             if logger is not None and print_level >= 3:
                 logger.info(
@@ -566,7 +612,7 @@ def _update_embedding_cache(
                     f"{len(needed_batches)}",
                     print_level=print_level,
                 )
-    return cache
+    return merged
 
 
 def _update_smiles_embedding_cache(
@@ -576,21 +622,39 @@ def _update_smiles_embedding_cache(
     batch_size: int = 50,
     save_every_batches: int = 1,
     use_tqdm: bool = True,
+    shared_cache_path: Path | None = None,
     logger: CustomLogger | None = None,
     print_level: int = 2,
 ) -> dict[str, np.ndarray]:
+    # Load shared cache first as baseline; local run cache overrides it.
+    shared_cache: dict[str, np.ndarray] = (
+        _load_smiles_cache(shared_cache_path) if shared_cache_path is not None else {}
+    )
     cache = _load_smiles_cache(cache_path)
+    # Merge: shared provides base, local run cache takes precedence.
+    merged: dict[str, np.ndarray] = {**shared_cache, **cache}
+
     unique_values = list(set(values))
     needed = [
         value
         for value in unique_values
-        if value not in cache or cache[value].shape[0] < amount_of_replicates
+        if value not in merged or merged[value].shape[0] < amount_of_replicates
     ]
-    request_hits = len(unique_values) - len(needed)
+    shared_hits = sum(
+        1
+        for v in unique_values
+        if v in shared_cache
+        and v not in cache
+        and shared_cache[v].shape[0] >= amount_of_replicates
+    )
+    local_hits = sum(
+        1 for v in unique_values if v in cache and cache[v].shape[0] >= amount_of_replicates
+    )
     if logger is not None:
         logger.info(
-            f"Cache {cache_path.name}: cache_entries_total={len(cache)}, "
-            f"request_unique={len(unique_values)}, request_hits={request_hits}, "
+            f"Cache {cache_path.name}: cache_entries_total={len(merged)}, "
+            f"request_unique={len(unique_values)}, "
+            f"local_hits={local_hits}, shared_hits={shared_hits}, "
             f"new_to_embed={len(needed)}, requested_replicates={amount_of_replicates}",
             print_level=print_level,
         )
@@ -629,10 +693,13 @@ def _update_smiles_embedding_cache(
             if new_vectors is None:
                 raise RuntimeError(f"Could not create embeddings for {cache_path.name}")
             for idx, key in enumerate(needed_batch):
-                cache[key] = np.asarray(new_vectors[idx])
+                merged[key] = np.asarray(new_vectors[idx])
 
             if batch_idx % save_every_batches == 0 or batch_idx == len(needed_batches):
-                _save_smiles_cache(cache_path, cache)
+                _save_smiles_cache(cache_path, merged)
+                if shared_cache_path is not None:
+                    shared_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    _save_smiles_cache(shared_cache_path, merged)
 
             if progress is not None:
                 progress.update(len(needed_batch))
@@ -649,7 +716,7 @@ def _update_smiles_embedding_cache(
 
         if logger is not None:
             logger.valid("SMILES embedding generation complete", print_level=print_level)
-    return cache
+    return merged
 
 
 def _aggregate_log_predictions(log_values: np.ndarray) -> dict[str, float]:
@@ -672,10 +739,37 @@ def _aggregate_log_predictions(log_values: np.ndarray) -> dict[str, float]:
     }
 
 
+def _build_missing_report_df(
+    missing_genes: set[str],
+    missing_smiles: set[str],
+) -> pd.DataFrame:
+    sorted_genes = sorted(missing_genes)
+    sorted_smiles = sorted(missing_smiles)
+    max_len = max(len(sorted_genes), len(sorted_smiles))
+    if max_len == 0:
+        return pd.DataFrame(columns=["missing_genes", "missing_smiles"])
+
+    return pd.DataFrame(
+        {
+            "missing_genes": sorted_genes + [None] * (max_len - len(sorted_genes)),
+            "missing_smiles": sorted_smiles + [None] * (max_len - len(sorted_smiles)),
+        }
+    )
+
+
+def some_function(
+    a: int,
+    b: str,
+    c: float = 1.0,
+) -> None:
+    print(f"a: {a}, b: {b}, c: {c}")
+
+
 def run_kcat_inference(
     *,
     model_file: Path,
     smiles_csv_file: Path | None = None,
+    sequence_csv_file: Path | None = None,
     sequence_level: str = "gene",
     species: str | None = None,
     amount_of_smiles_replicates: int = 50,
@@ -687,6 +781,9 @@ def run_kcat_inference(
     embedding_batch_size: int = 50,
     embedding_cache_save_every_batches: int = 1,
     prediction_checkpoint_every_chunks: int = 10,
+    target_pairs: list[tuple[str, str]] | None = None,
+    kcat_root: Path | None = None,
+    shared_embedding_cache_dir: Path | None = None,
     print_level: int = 2,
     logger: CustomLogger | None = None,
     use_tqdm: bool = True,
@@ -711,6 +808,12 @@ def run_kcat_inference(
         use_mapping_as_primary,
         print_level=2,
     )
+    _log_key_value(
+        logger,
+        "Shared embedding cache dir",
+        shared_embedding_cache_dir if shared_embedding_cache_dir else "disabled",
+        print_level=2,
+    )
     _log_key_value(logger, "SMILES replicates", amount_of_smiles_replicates, print_level=2)
     _log_key_value(logger, "Embedding batch size", embedding_batch_size, print_level=2)
     _log_key_value(
@@ -725,6 +828,18 @@ def run_kcat_inference(
         smiles_csv_file if smiles_csv_file else "hook/file",
         print_level=2,
     )
+    _log_key_value(
+        logger,
+        "Sequence source",
+        sequence_csv_file if sequence_csv_file else "output/retrieval",
+        print_level=2,
+    )
+    _log_key_value(
+        logger,
+        "Target pairs",
+        len(target_pairs) if target_pairs else "all model pairs",
+        print_level=2,
+    )
 
     _log_step(logger, "Loading COBRA model", print_level=2)
     cobra_model = load_json_model(model_file)
@@ -734,7 +849,7 @@ def run_kcat_inference(
     )
 
     _log_step(logger, "Resolving output paths", print_level=2)
-    paths = build_kcat_paths(model_file)
+    paths = build_kcat_paths(model_file, kcat_root=kcat_root)
     logger.set_log_files_location(str(paths.output_dir / "logs"))
     _log_key_value(logger, "Output dir", paths.output_dir, print_level=2)
     _log_key_value(logger, "Sequence file", paths.sequence_file, print_level=3)
@@ -750,22 +865,51 @@ def run_kcat_inference(
         legacy_file=paths.gene_metabolite_pairs_legacy_file,
     )
     pair_payload = json.loads(paths.gene_metabolite_pairs_file.read_text(encoding="utf-8"))
-    _log_key_value(logger, "Total gene-metabolite pairs", len(pair_payload), print_level=2)
+    all_pairs = [(str(v[0]), str(v[1])) for v in pair_payload.values()]
+    _log_key_value(
+        logger, "Total gene-metabolite pairs (model)", len(all_pairs), print_level=2
+    )
+
+    if target_pairs:
+        requested_pairs = [(str(g), str(m)) for g, m in target_pairs]
+        requested_set = set(requested_pairs)
+        model_pair_set = set(all_pairs)
+        missing_requested_pairs = sorted(requested_set - model_pair_set)
+        all_pairs = [pair for pair in requested_pairs if pair in model_pair_set]
+        _log_key_value(logger, "Requested target pairs", len(requested_pairs), print_level=2)
+        _log_key_value(logger, "Valid target pairs in model", len(all_pairs), print_level=2)
+        if missing_requested_pairs:
+            logger.warning(
+                f"Requested target pairs not found in model: {missing_requested_pairs}",
+                print_level=2,
+            )
+
+    required_gene_ids = {gene_id for gene_id, _ in all_pairs}
+    required_metabolite_ids = {metabolite_id for _, metabolite_id in all_pairs}
+    _log_key_value(logger, "Pairs selected for processing", len(all_pairs), print_level=2)
 
     # 2) Sequence file: append only missing genes
     _log_step(logger, "Preparing gene/transcript sequence table", print_level=2)
-    if paths.sequence_file.exists():
+    if sequence_csv_file is not None:
+        sequence_df = _read_csv_flexible(sequence_csv_file)
+        sequence_df.to_csv(paths.sequence_file, index=False)
+        _log_key_value(
+            logger,
+            "Sequence source",
+            f"Provided CSV ({sequence_csv_file})",
+            print_level=2,
+        )
+    elif paths.sequence_file.exists():
         sequence_df = _read_csv_flexible(paths.sequence_file)
         _log_key_value(logger, "Existing sequence rows", len(sequence_df), print_level=2)
     else:
         sequence_df = pd.DataFrame(columns=["ensemble_id", "protein_sequence"])
         _log_key_value(logger, "Existing sequence rows", 0, print_level=2)
 
-    model_genes = {gene.id for gene in cobra_model.genes}
     existing_genes = set(
         sequence_df.get("ensemble_id", pd.Series(dtype=str)).astype(str).tolist()
     )
-    missing_genes = sorted(model_genes - existing_genes)
+    missing_genes = sorted(required_gene_ids - existing_genes)
     _log_key_value(logger, "Genes missing sequence", len(missing_genes), print_level=2)
     if missing_genes:
         logger.info(f"Genes missing from sequence CSV: {missing_genes}", print_level=2)
@@ -827,6 +971,8 @@ def run_kcat_inference(
     seq_pairs: pd.DataFrame = (
         sequence_df.loc[:, ["ensemble_id", "protein_sequence"]].dropna().copy()
     )
+    if required_gene_ids:
+        seq_pairs = seq_pairs[seq_pairs["ensemble_id"].astype(str).isin(required_gene_ids)]
     if "is_canonical" in sequence_df.columns:
         seq_pairs["is_canonical"] = (
             sequence_df.loc[seq_pairs.index, "is_canonical"].fillna(False).astype(bool)
@@ -843,6 +989,10 @@ def run_kcat_inference(
     )
     _log_key_value(logger, "Genes with usable sequences", len(seq_by_gene), print_level=2)
     smiles_pairs = smiles_df[["id", type_of_smiles]].dropna()
+    if required_metabolite_ids:
+        smiles_pairs = smiles_pairs[
+            smiles_pairs["id"].astype(str).isin(required_metabolite_ids)
+        ]
     smiles_by_id = dict(
         zip(smiles_pairs["id"].astype(str), smiles_pairs[type_of_smiles].astype(str))
     )
@@ -894,9 +1044,16 @@ def run_kcat_inference(
         key_normalizer=_normalize_sequence_cache_key,
         batch_size=embedding_batch_size,
         save_every_batches=embedding_cache_save_every_batches,
+        shared_cache_path=(
+            shared_embedding_cache_dir / "sequence_embedding_cache.pkl"
+            if shared_embedding_cache_dir is not None
+            else None
+        ),
         logger=logger,
         print_level=print_level,
     )
+    # SMILES shared cache is keyed per smiles-type so isomeric and canonical don't mix.
+    _smiles_type_slug = type_of_smiles.lower().replace(" ", "_")
     smiles_cache = _update_smiles_embedding_cache(
         list(set(smiles_by_id.values())),
         paths.smiles_tensor_cache_file,
@@ -904,6 +1061,11 @@ def run_kcat_inference(
         batch_size=embedding_batch_size,
         save_every_batches=embedding_cache_save_every_batches,
         use_tqdm=use_tqdm,
+        shared_cache_path=(
+            shared_embedding_cache_dir / f"smiles_embedding_cache_{_smiles_type_slug}.pkl"
+            if shared_embedding_cache_dir is not None
+            else None
+        ),
         logger=logger,
         print_level=print_level,
     )
@@ -929,7 +1091,6 @@ def run_kcat_inference(
             )
         )
 
-    all_pairs = [(str(v[0]), str(v[1])) for v in pair_payload.values()]
     _log_key_value(logger, "Total gene-metabolite pairs", len(all_pairs), print_level=2)
 
     pending_pairs: list[tuple[str, str, bool]] = []
@@ -1116,13 +1277,7 @@ def run_kcat_inference(
     )
     _log_key_value(logger, "Final prediction rows", len(predictions_df), print_level=2)
 
-    missing_df = pd.DataFrame(
-        {
-            "missing_genes": list(sorted(missing_genes))
-            + [None] * (len(missing_smiles) - len(missing_genes)),
-            "missing_smiles": sorted(missing_smiles),
-        }
-    )
+    missing_df = _build_missing_report_df(missing_genes, missing_smiles)
     missing_df.to_csv(paths.missing_csv_file, index=False)
     _log_key_value(logger, "Missing report rows", len(missing_df), print_level=2)
 
@@ -1191,18 +1346,91 @@ def main() -> None:
     )
 
 
+def run_small_test():
+    project_root = get_project_root()
+    model_dir = project_root / "data" / "for_SWAMP" / "models" / "model_inhouse_v9_human"
+    model_file = _find_first_model_json(model_dir)
+
+    reference_pair = ("ENSG00000172955", "MAM01249[c]")
+    smiles_source = model_dir / "final_SMILES_metabolite_df.csv"
+    sequence_source = model_dir / "final_transcript_sequence_df.csv"
+    model_pickle = project_root / "UniKP" / "UniKP20kcat.pkl"
+
+    required_files = [model_file, smiles_source, sequence_source, model_pickle]
+    missing_files = [path for path in required_files if not path.exists()]
+    if missing_files:
+        missing_list = ", ".join(str(path) for path in missing_files)
+        raise FileNotFoundError(f"run_small_test missing required file(s): {missing_list}")
+
+    smiles_df = _read_csv_flexible(smiles_source)
+    smiles_df = smiles_df[
+        (smiles_df["id"].astype(str) == reference_pair[1])
+        & smiles_df["isomeric SMILES"].notna()
+        & (smiles_df["isomeric SMILES"].astype(str) != "")
+    ][["id", "isomeric SMILES"]]
+    if smiles_df.empty:
+        raise ValueError(
+            f"Small test metabolite not found or missing SMILES: {reference_pair[1]}"
+        )
+
+    sequence_df = _read_csv_flexible(sequence_source)
+    sequence_df = sequence_df[
+        (sequence_df["ensemble_id"].astype(str) == reference_pair[0])
+        & sequence_df["protein_sequence"].notna()
+        & (sequence_df["protein_sequence"].astype(str) != "")
+    ][["ensemble_id", "protein_sequence"]]
+    if sequence_df.empty:
+        raise ValueError(
+            f"Small test gene not found or missing sequence: {reference_pair[0]}"
+        )
+
+    small_test_dir = project_root / "data" / "for_SWAMP" / "Kcat_predictions" / "_small_test"
+    input_dir = small_test_dir / "inputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    smiles_input = input_dir / "small_test_smiles.csv"
+    sequence_input = input_dir / "small_test_sequence.csv"
+    smiles_df.to_csv(smiles_input, index=False)
+    sequence_df.to_csv(sequence_input, index=False)
+
+    return run_kcat_inference(
+        model_file=model_file,
+        smiles_csv_file=smiles_input,
+        sequence_csv_file=sequence_input,
+        species="human",
+        sequence_level="gene",
+        amount_of_smiles_replicates=50,
+        type_of_smiles="isomeric SMILES",
+        model_pickle=model_pickle,
+        target_pairs=[reference_pair],
+        kcat_root=small_test_dir,
+        chunk_size=1,
+        embedding_batch_size=10,
+        embedding_cache_save_every_batches=1,
+        prediction_checkpoint_every_chunks=1,
+        print_level=2,
+        use_tqdm=False,
+    )
+
+
 if __name__ == "__main__":
     # main()
+    run_mode = "full"  # options: "small_test", "full"
+
+    if run_mode == "small_test":
+        run_small_test()
+        raise SystemExit(0)
+
     # run using model
     project_root = get_project_root()
     data_dir = project_root / "data"
     models_dir = data_dir / "for_SWAMP" / "models"
-    model_name = "MouseGEM_1_8_mouse"
+    model_name = "model_inhouse_v9_human"
     model_dir = models_dir / model_name
     model_file = _find_first_model_json(model_dir)
 
     ############# user input #############
-    species = "mouse"
+    species = "human"
     sequence_level = "gene"
     amount_of_smiles_replicates = 50
     chunk_size = 200
@@ -1212,7 +1440,7 @@ if __name__ == "__main__":
     print_level = 2
 
     smiles_csv = model_dir / "final_SMILES_metabolite_df.csv"
-    additional_mapping_file = model_dir / "MouseGEM_1_8_MGI_gene_ID_mapping.csv"
+    # additional_mapping_file = model_dir / "MouseGEM_1_8_MGI_gene_ID_mapping.csv"
     run_kcat_inference(
         model_file=model_file,
         smiles_csv_file=smiles_csv,
@@ -1223,6 +1451,6 @@ if __name__ == "__main__":
         embedding_batch_size=embedding_batch_size,
         embedding_cache_save_every_batches=embedding_cache_save_every_batches,
         prediction_checkpoint_every_chunks=prediction_checkpoint_every_chunks,
-        gene_id_mapping_file=additional_mapping_file,
+        # gene_id_mapping_file=additional_mapping_file,
         print_level=print_level,
     )
