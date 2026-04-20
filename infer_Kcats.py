@@ -66,7 +66,9 @@ else:
 try:
     from UniKP.compat_sklearn import safe_load_sklearn_model
 except ModuleNotFoundError:
-    from compat_sklearn import safe_load_sklearn_model  # ty: ignore[unresolved-import] # noqa: I001
+    from compat_sklearn import (  # ty: ignore[unresolved-import]
+        safe_load_sklearn_model,
+    )  # ty: ignore[unresolved-import] # noqa: I001
 
 from src.cobrapy_fork.io import load_json_model
 from src.SWAMP.sequence_retrieval import (
@@ -107,9 +109,40 @@ def _normalize_sequence_cache_key(sequence: str) -> str:
 
 def _normalize_metabolite_id_for_matching(metabolite_id: str) -> str:
     """Best-effort normalization for metabolite id diagnostics."""
-    normalized = re.sub(r"\[[^]]+]$", "", metabolite_id)
-    normalized = re.sub(r"_[a-zA-Z]$", "", normalized)
+    normalized = metabolite_id.strip()
+    normalized = re.sub(r"\[[^]]+]$", "", normalized)
+    normalized = re.sub(r"_[A-Za-z0-9]+$", "", normalized)
+    # Handle compact compartment suffixes like MAM01249c.
+    if re.match(r"^MAM\d+[a-z]$", normalized):
+        normalized = normalized[:-1]
     return normalized
+
+
+def _compartment_format_variants(metabolite_id: str) -> list[str]:
+    """Generate equivalent compartment-format IDs for direct lookup.
+
+    Example: MAM01249c <-> MAM01249[c] <-> MAM01249_c
+    """
+    value = metabolite_id.strip()
+    variants: list[str] = []
+
+    bracket_match = re.match(r"^(.+)\[([A-Za-z0-9]+)]$", value)
+    if bracket_match is not None:
+        base, compartment = bracket_match.group(1), bracket_match.group(2)
+        variants.extend([f"{base}{compartment}", f"{base}_{compartment}"])
+
+    underscore_match = re.match(r"^(.+)_([A-Za-z0-9]+)$", value)
+    if underscore_match is not None:
+        base, compartment = underscore_match.group(1), underscore_match.group(2)
+        variants.extend([f"{base}[{compartment}]", f"{base}{compartment}"])
+
+    compact_match = re.match(r"^(MAM\d+)([a-z])$", value)
+    if compact_match is not None:
+        base, compartment = compact_match.group(1), compact_match.group(2)
+        variants.extend([f"{base}[{compartment}]", f"{base}_{compartment}"])
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(variants))
 
 
 # -----------------------------------------------------------------------------
@@ -757,6 +790,16 @@ def _build_missing_report_df(
     )
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+
 def some_function(
     a: int,
     b: str,
@@ -989,13 +1032,68 @@ def run_kcat_inference(
     )
     _log_key_value(logger, "Genes with usable sequences", len(seq_by_gene), print_level=2)
     smiles_pairs = smiles_df[["id", type_of_smiles]].dropna()
-    if required_metabolite_ids:
-        smiles_pairs = smiles_pairs[
-            smiles_pairs["id"].astype(str).isin(required_metabolite_ids)
-        ]
-    smiles_by_id = dict(
+    smiles_by_id_exact = dict(
         zip(smiles_pairs["id"].astype(str), smiles_pairs[type_of_smiles].astype(str))
     )
+    normalized_smiles_id_to_ids: dict[str, list[str]] = {}
+    for smiles_met_id in smiles_by_id_exact:
+        norm_id = _normalize_metabolite_id_for_matching(smiles_met_id)
+        normalized_smiles_id_to_ids.setdefault(norm_id, []).append(smiles_met_id)
+
+    # Resolve model metabolite ids to available SMILES ids.
+    # Priority: exact id match -> unique normalized-id match.
+    smiles_by_id: dict[str, str] = {}
+    smiles_source_id_by_model_metabolite: dict[str, str] = {}
+    resolved_by_exact_id = 0
+    resolved_by_compartment_variant = 0
+    resolved_by_normalized_id = 0
+    ambiguous_normalized_ids: set[str] = set()
+    if required_metabolite_ids:
+        metabolite_ids_to_resolve = required_metabolite_ids
+    else:
+        metabolite_ids_to_resolve = set(smiles_by_id_exact.keys())
+
+    for model_metabolite_id in metabolite_ids_to_resolve:
+        if model_metabolite_id in smiles_by_id_exact:
+            smiles_by_id[model_metabolite_id] = smiles_by_id_exact[model_metabolite_id]
+            smiles_source_id_by_model_metabolite[model_metabolite_id] = model_metabolite_id
+            resolved_by_exact_id += 1
+            continue
+
+        resolved_variant = False
+        for variant_id in _compartment_format_variants(model_metabolite_id):
+            if variant_id in smiles_by_id_exact:
+                smiles_by_id[model_metabolite_id] = smiles_by_id_exact[variant_id]
+                smiles_source_id_by_model_metabolite[model_metabolite_id] = variant_id
+                resolved_by_compartment_variant += 1
+                resolved_variant = True
+                break
+        if resolved_variant:
+            continue
+
+        normalized_model_id = _normalize_metabolite_id_for_matching(model_metabolite_id)
+        candidate_smiles_ids = normalized_smiles_id_to_ids.get(normalized_model_id, [])
+        if len(candidate_smiles_ids) == 1:
+            source_smiles_id = candidate_smiles_ids[0]
+            smiles_by_id[model_metabolite_id] = smiles_by_id_exact[source_smiles_id]
+            smiles_source_id_by_model_metabolite[model_metabolite_id] = source_smiles_id
+            resolved_by_normalized_id += 1
+            continue
+
+        if len(candidate_smiles_ids) > 1:
+            candidate_smiles_values = {
+                smiles_by_id_exact[candidate_id] for candidate_id in candidate_smiles_ids
+            }
+            # Deterministic fallback if multiple IDs normalize to same key but
+            # still map to one identical SMILES value.
+            if len(candidate_smiles_values) == 1:
+                source_smiles_id = sorted(candidate_smiles_ids)[0]
+                smiles_by_id[model_metabolite_id] = smiles_by_id_exact[source_smiles_id]
+                smiles_source_id_by_model_metabolite[model_metabolite_id] = source_smiles_id
+                resolved_by_normalized_id += 1
+                continue
+            ambiguous_normalized_ids.add(normalized_model_id)
+
     # Track which metabolite ids would be truncated during SMILES tokenization.
     truncated_smiles_metabolite_ids: set[str] = set()
     try:
@@ -1015,7 +1113,37 @@ def run_kcat_inference(
         # If tokenization helper import fails, continue without this annotation.
         truncated_smiles_metabolite_ids = set()
 
+    # Remap truncation annotations from source SMILES ids to model metabolite ids.
+    truncated_smiles_metabolite_ids_resolved: set[str] = set()
+    for model_metabolite_id, source_smiles_id in smiles_source_id_by_model_metabolite.items():
+        if source_smiles_id in truncated_smiles_metabolite_ids:
+            truncated_smiles_metabolite_ids_resolved.add(model_metabolite_id)
+
     _log_key_value(logger, "Metabolites with usable SMILES", len(smiles_by_id), print_level=2)
+    _log_key_value(
+        logger,
+        "SMILES id resolution (exact)",
+        resolved_by_exact_id,
+        print_level=2,
+    )
+    _log_key_value(
+        logger,
+        "SMILES id resolution (compartment format fallback)",
+        resolved_by_compartment_variant,
+        print_level=2,
+    )
+    _log_key_value(
+        logger,
+        "SMILES id resolution (normalized fallback)",
+        resolved_by_normalized_id,
+        print_level=2,
+    )
+    _log_key_value(
+        logger,
+        "SMILES id resolution (ambiguous normalized ids)",
+        len(ambiguous_normalized_ids),
+        print_level=2,
+    )
     model_met_ids = {str(m.id) for m in cobra_model.metabolites}
     smiles_met_ids = set(smiles_by_id.keys())
     raw_met_overlap = len(model_met_ids & smiles_met_ids)
@@ -1083,13 +1211,18 @@ def run_kcat_inference(
     _log_key_value(logger, "Existing prediction rows", len(predictions_df), print_level=2)
 
     done_pairs: set[tuple[str, str]] = set()
+    existing_rows_by_pair: dict[tuple[str, str], dict[str, object]] = {}
     if not predictions_df.empty:
-        done_pairs = set(
-            zip(
-                predictions_df["ensemble_id"].astype(str),
-                predictions_df["metabolite_id"].astype(str),
-            )
-        )
+        for _, row in predictions_df.iterrows():
+            gene_id = str(row.get("ensemble_id", ""))
+            metabolite_id = str(row.get("metabolite_id", ""))
+            if not gene_id or not metabolite_id:
+                continue
+            pair_key: tuple[str, str] = (gene_id, metabolite_id)
+            row_dict: dict[str, object] = {
+                str(column): value for column, value in row.to_dict().items()
+            }
+            existing_rows_by_pair[pair_key] = row_dict
 
     _log_key_value(logger, "Total gene-metabolite pairs", len(all_pairs), print_level=2)
 
@@ -1097,12 +1230,21 @@ def run_kcat_inference(
     missing_genes: set[str] = set()
     missing_smiles: set[str] = set()
     cached_pairs: set[tuple[str, str]] = set()
+    stale_fallback_pairs: set[tuple[str, str]] = set()
     missing_gene_pairs_count = 0
     missing_smiles_pairs_count = 0
     for gene_id, metabolite_id in all_pairs:
-        if (gene_id, metabolite_id) in done_pairs:
-            cached_pairs.add((gene_id, metabolite_id))
-            continue
+        existing_row = existing_rows_by_pair.get((gene_id, metabolite_id))
+        if existing_row is not None:
+            cached_missing_smiles = _as_bool(existing_row.get("missing_smiles", False))
+            # If an older run used missing-SMILES fallback but this run now has
+            # SMILES, recompute this pair with full stochastic replicates.
+            if cached_missing_smiles and metabolite_id in smiles_by_id:
+                stale_fallback_pairs.add((gene_id, metabolite_id))
+            else:
+                done_pairs.add((gene_id, metabolite_id))
+                cached_pairs.add((gene_id, metabolite_id))
+                continue
         if gene_id not in seq_by_gene:
             missing_genes.add(gene_id)
             missing_gene_pairs_count += 1
@@ -1116,6 +1258,12 @@ def run_kcat_inference(
 
     _log_key_value(logger, "Pending pairs", len(pending_pairs), print_level=2)
     _log_key_value(logger, "Pairs already cached", len(cached_pairs), print_level=2)
+    _log_key_value(
+        logger,
+        "Stale cached fallback pairs to recompute",
+        len(stale_fallback_pairs),
+        print_level=2,
+    )
     _log_key_value(logger, "Pairs missing genes", missing_gene_pairs_count, print_level=2)
     _log_key_value(logger, "Unique missing gene IDs", len(missing_genes), print_level=2)
     if missing_genes:
@@ -1131,12 +1279,31 @@ def run_kcat_inference(
         f"Pair summary: "
         f"total={len(all_pairs)}, "
         f"cached={len(cached_pairs)}, "
+        f"stale_cached_fallback_recompute={len(stale_fallback_pairs)}, "
         f"ready_for_inference={len(pending_pairs)}, "
         f"missing_gene={missing_gene_pairs_count}, "
         f"missing_smiles_fallback_in_ready={missing_smiles_pairs_count}, "
         f"accounted={total_accounted}",
         print_level=2,
     )
+
+    if stale_fallback_pairs and not predictions_df.empty:
+        stale_keys = {
+            f"{gene_id}|||{metabolite_id}" for gene_id, metabolite_id in stale_fallback_pairs
+        }
+        prediction_keys = (
+            predictions_df["ensemble_id"].astype(str)
+            + "|||"
+            + predictions_df["metabolite_id"].astype(str)
+        )
+        stale_mask = prediction_keys.isin(stale_keys)
+        stale_rows_removed = int(stale_mask.sum())
+        predictions_df = predictions_df.loc[~stale_mask].copy()
+        if stale_rows_removed and logger is not None:
+            logger.info(
+                f"Dropped stale cached fallback prediction rows: {stale_rows_removed}",
+                print_level=2,
+            )
 
     if pending_pairs:
         _log_step(logger, "Running model inference for pending pairs", print_level=2)
@@ -1213,7 +1380,7 @@ def run_kcat_inference(
                         gene_id,
                         metabolite_id,
                         is_missing_smi,
-                        (metabolite_id in truncated_smiles_metabolite_ids)
+                        (metabolite_id in truncated_smiles_metabolite_ids_resolved)
                         if not is_missing_smi
                         else False,
                         replicate_count,
@@ -1258,7 +1425,7 @@ def run_kcat_inference(
                 if logger is not None:
                     logger.info(
                         f"Checkpoint written after chunk {chunk_index}/{total_chunks}",
-                        print_level=print_level,
+                        print_level=3,
                     )
 
         logger.valid("Model prediction completed", print_level=2)
@@ -1425,21 +1592,22 @@ if __name__ == "__main__":
     project_root = get_project_root()
     data_dir = project_root / "data"
     models_dir = data_dir / "for_SWAMP" / "models"
-    model_name = "model_inhouse_v9_human"
+    model_name = "mouseGEM_1_8_mouse_inhouse_v9"
     model_dir = models_dir / model_name
     model_file = _find_first_model_json(model_dir)
 
     ############# user input #############
-    species = "human"
+    species = "mouse"
     sequence_level = "gene"
-    amount_of_smiles_replicates = 50
+    amount_of_smiles_replicates = 200
     chunk_size = 200
-    embedding_batch_size = 50
+    embedding_batch_size = 200
     embedding_cache_save_every_batches = 1
     prediction_checkpoint_every_chunks = 10
     print_level = 2
 
-    smiles_csv = model_dir / "final_SMILES_metabolite_df.csv"
+    alt_model_dir = data_dir / "for_SWAMP" / "models" / "model_inhouse_v9_human"
+    smiles_csv = alt_model_dir / "final_SMILES_metabolite_df.csv"
     # additional_mapping_file = model_dir / "MouseGEM_1_8_MGI_gene_ID_mapping.csv"
     run_kcat_inference(
         model_file=model_file,
