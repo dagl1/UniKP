@@ -800,6 +800,115 @@ def _as_bool(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
+def _resolve_lean_model_root() -> Path:
+    model_root = Path(__file__).resolve().parent / "models"
+    model_root.mkdir(parents=True, exist_ok=True)
+    return model_root
+
+
+def _resolve_lean_model_pickle(model_root: Path) -> Path:
+    model_pickle = model_root / "UniKP20kcat.pkl"
+    if model_pickle.exists():
+        return model_pickle
+
+    available_pickles = sorted(model_root.glob("*.pkl"))
+    if len(available_pickles) == 1:
+        return available_pickles[0]
+    raise FileNotFoundError(
+        "Could not resolve installed model pickle in models/. "
+        "Expected models/UniKP20kcat.pkl or exactly one *.pkl file."
+    )
+
+
+def _build_lean_kcat_paths(model_root: Path) -> KcatPaths:
+    output_dir = model_root / "lean_kcat_inference"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return KcatPaths(
+        output_dir=output_dir,
+        smiles_file=output_dir / "metabolite_smiles.csv",
+        sequence_file=output_dir / "gene_or_transcript_protein_sequences.csv",
+        gene_metabolite_pairs_file=output_dir / "gene_metabolite_pairs.json",
+        gene_metabolite_pairs_legacy_file=output_dir / "gene_smiles_reactions_pairs.json",
+        sequence_tensor_cache_file=output_dir / "sequence_embedding_cache.pkl",
+        smiles_tensor_cache_file=output_dir / "smiles_embedding_cache.pkl",
+        predictions_csv_file=output_dir / "kcat_gene_metabolite_predictions.csv",
+        predictions_json_file=output_dir / "kcat_gene_metabolite_predictions.json",
+        missing_csv_file=output_dir / "missing_genes_and_smiles.csv",
+    )
+
+
+def _flatten_lean_pairs(gene_substrate_paris: dict[str, set[str]]) -> list[tuple[str, str]]:
+    all_pairs: list[tuple[str, str]] = []
+    for gene_id, metabolite_ids in gene_substrate_paris.items():
+        for metabolite_id in metabolite_ids:
+            all_pairs.append((str(gene_id), str(metabolite_id)))
+    return sorted(set(all_pairs))
+
+
+def _prepare_lean_sequence_map(
+    transcript_df: pd.DataFrame,
+    required_gene_ids: set[str],
+) -> dict[str, str]:
+    if "protein_sequence" not in transcript_df.columns:
+        raise ValueError("transcript_df must contain 'protein_sequence' column")
+    if transcript_df.index.hasnans:
+        raise ValueError("transcript_df index must contain gene ids (no NaN index values)")
+
+    seq_pairs = transcript_df[["protein_sequence"]].copy()
+    seq_pairs = seq_pairs[seq_pairs["protein_sequence"].notna()]
+    seq_pairs["protein_sequence"] = seq_pairs["protein_sequence"].astype(str)
+    seq_pairs = seq_pairs[seq_pairs["protein_sequence"] != ""]
+    seq_pairs.index = seq_pairs.index.astype(str)
+    seq_pairs = seq_pairs[~seq_pairs.index.duplicated(keep="first")]
+    if required_gene_ids:
+        seq_pairs = seq_pairs.loc[seq_pairs.index.isin(required_gene_ids)]
+    return seq_pairs["protein_sequence"].to_dict()
+
+
+def _prepare_lean_smiles_map(
+    smiles_df: pd.DataFrame,
+    required_metabolite_ids: set[str],
+    type_of_smiles: str,
+) -> dict[str, str]:
+    if type_of_smiles not in smiles_df.columns:
+        raise ValueError(f"smiles_df must contain '{type_of_smiles}' column")
+    if smiles_df.index.hasnans:
+        raise ValueError("smiles_df index must contain metabolite ids (no NaN index values)")
+
+    smiles_pairs = smiles_df[[type_of_smiles]].copy()
+    smiles_pairs = smiles_pairs[smiles_pairs[type_of_smiles].notna()]
+    smiles_pairs[type_of_smiles] = smiles_pairs[type_of_smiles].astype(str)
+    smiles_pairs = smiles_pairs[smiles_pairs[type_of_smiles] != ""]
+    smiles_pairs.index = smiles_pairs.index.astype(str)
+    smiles_pairs = smiles_pairs[~smiles_pairs.index.duplicated(keep="first")]
+    if required_metabolite_ids:
+        smiles_pairs = smiles_pairs.loc[smiles_pairs.index.isin(required_metabolite_ids)]
+    return smiles_pairs[type_of_smiles].to_dict()
+
+
+def _get_truncated_smiles_ids(smiles_by_id: dict[str, str]) -> set[str]:
+    truncated_smiles_metabolite_ids: set[str] = set()
+    try:
+        try:
+            from UniKP.utils import split as _split_smiles
+        except ModuleNotFoundError:
+            from utils import split as _split_smiles  # ty: ignore[unresolved-import]
+
+        for met_id, smiles in smiles_by_id.items():
+            tokenized = _split_smiles(smiles)
+            if len(tokenized.split()) > 218:
+                truncated_smiles_metabolite_ids.add(met_id)
+    except Exception:  # noqa: BLE001
+        return set()
+    return truncated_smiles_metabolite_ids
+
+
+def _load_lean_prediction_cache(cache_file: Path) -> pd.DataFrame:
+    if cache_file.exists():
+        return _read_csv_flexible(cache_file)
+    return pd.DataFrame()
+
+
 def run_kcat_inference_lean(
     smiles_df: pd.DataFrame,
     transcript_df: pd.DataFrame,
@@ -810,8 +919,232 @@ def run_kcat_inference_lean(
     prediction_checkpoint_every_chunks: int = 10,
     amount_of_smiles_replicates: int = 50,
     type_of_smiles: str = "isomeric SMILES",
-):
-    pass
+) -> tuple[KcatPaths, pd.DataFrame]:
+    model_root = _resolve_lean_model_root()
+    model_pickle = _resolve_lean_model_pickle(model_root)
+    paths = _build_lean_kcat_paths(model_root)
+
+    all_pairs = _flatten_lean_pairs(gene_substrate_paris)
+    required_gene_ids = {gene_id for gene_id, _ in all_pairs}
+    required_metabolite_ids = {metabolite_id for _, metabolite_id in all_pairs}
+
+    seq_by_gene = _prepare_lean_sequence_map(transcript_df, required_gene_ids)
+    smiles_by_id = _prepare_lean_smiles_map(smiles_df, required_metabolite_ids, type_of_smiles)
+    truncated_smiles_metabolite_ids = _get_truncated_smiles_ids(smiles_by_id)
+
+    sequence_cache = _update_embedding_cache(
+        list(set(seq_by_gene.values())),
+        paths.sequence_tensor_cache_file,
+        lambda values: sequence_to_embedding(values, logger=None, use_tqdm=False),
+        key_normalizer=_normalize_sequence_cache_key,
+        batch_size=embedding_batch_size,
+        save_every_batches=embedding_cache_save_every_batches,
+        shared_cache_path=None,
+        logger=None,
+        print_level=0,
+    )
+    smiles_cache = _update_smiles_embedding_cache(
+        list(set(smiles_by_id.values())),
+        paths.smiles_tensor_cache_file,
+        amount_of_replicates=amount_of_smiles_replicates,
+        batch_size=embedding_batch_size,
+        save_every_batches=embedding_cache_save_every_batches,
+        use_tqdm=False,
+        shared_cache_path=None,
+        logger=None,
+        print_level=0,
+    )
+
+    cache_file = paths.output_dir / "kcat_gene_metabolite_predictions_cache.csv"
+    cache_scope_columns = ["cache_type_of_smiles", "cache_amount_of_smiles_replicates"]
+    cache_df = _load_lean_prediction_cache(cache_file)
+    for col in PREDICTION_COLUMNS + cache_scope_columns:
+        if col not in cache_df.columns:
+            cache_df[col] = np.nan
+
+    cache_replicates = pd.to_numeric(
+        cache_df["cache_amount_of_smiles_replicates"],
+        errors="coerce",
+    ).fillna(-1)
+    active_cache = cache_df[
+        (cache_df["cache_type_of_smiles"].astype(str) == str(type_of_smiles))
+        & (cache_replicates.astype(int).eq(int(amount_of_smiles_replicates)))
+    ].copy()
+    if not active_cache.empty:
+        active_cache = active_cache.drop_duplicates(
+            subset=["ensemble_id", "metabolite_id"],
+            keep="last",
+        )
+
+    existing_rows_by_pair: dict[tuple[str, str], dict[str, object]] = {}
+    for _, row in active_cache.iterrows():
+        gene_id = str(row.get("ensemble_id", ""))
+        metabolite_id = str(row.get("metabolite_id", ""))
+        if not gene_id or not metabolite_id:
+            continue
+        existing_rows_by_pair[(gene_id, metabolite_id)] = {
+            str(column): value for column, value in row.to_dict().items()
+        }
+
+    done_pairs: set[tuple[str, str]] = set()
+    pending_pairs: list[tuple[str, str, bool]] = []
+    missing_genes: set[str] = set()
+    missing_smiles: set[str] = set()
+    for gene_id, metabolite_id in all_pairs:
+        existing_row = existing_rows_by_pair.get((gene_id, metabolite_id))
+        if existing_row is not None:
+            # Missing-SMILES rows are never reusable cache entries.
+            if not _as_bool(existing_row.get("missing_smiles", False)):
+                done_pairs.add((gene_id, metabolite_id))
+                continue
+        if gene_id not in seq_by_gene:
+            missing_genes.add(gene_id)
+            continue
+        if metabolite_id not in smiles_by_id:
+            missing_smiles.add(metabolite_id)
+            pending_pairs.append((gene_id, metabolite_id, True))
+            continue
+        pending_pairs.append((gene_id, metabolite_id, False))
+
+    reused_rows_df = pd.DataFrame(
+        [
+            existing_rows_by_pair[pair]
+            for pair in sorted(done_pairs)
+            if pair in existing_rows_by_pair
+        ]
+    )
+
+    new_rows: list[dict[str, object]] = []
+
+    if pending_pairs:
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be >= 1")
+
+        model = safe_load_sklearn_model(model_pickle)
+        for chunk_index, chunk_start in enumerate(range(0, len(pending_pairs), chunk_size), start=1):
+            pair_chunk = pending_pairs[chunk_start : chunk_start + chunk_size]
+            chunk_feature_batches = []
+            chunk_pair_meta: list[tuple[str, str, bool, bool, int]] = []
+
+            if any(is_missing_smi for _, _, is_missing_smi in pair_chunk) and "" not in smiles_cache:
+                empty_embedding = smiles_to_embedding(
+                    [""],
+                    logger=None,
+                    print_level=0,
+                    amount_of_replicates=1,
+                    log_start=False,
+                )
+                if empty_embedding is None:
+                    raise RuntimeError("Could not create empty-SMILES fallback embedding")
+                smiles_cache[""] = np.asarray(empty_embedding[0])
+                _save_smiles_cache(paths.smiles_tensor_cache_file, smiles_cache)
+
+            for gene_id, metabolite_id, is_missing_smi in pair_chunk:
+                sequence_key = _normalize_sequence_cache_key(seq_by_gene[gene_id])
+                seq_vec = sequence_cache[sequence_key]
+                if is_missing_smi:
+                    smi_vecs = smiles_cache[""]
+                    replicate_count = 1
+                else:
+                    smi_vecs = smiles_cache[smiles_by_id[metabolite_id]]
+                    replicate_count = amount_of_smiles_replicates
+                    if smi_vecs.shape[0] < amount_of_smiles_replicates:
+                        raise RuntimeError(
+                            f"Cached SMILES embeddings for {metabolite_id} have only "
+                            f"{smi_vecs.shape[0]} replicate(s), expected "
+                            f"{amount_of_smiles_replicates}"
+                        )
+
+                for rep_idx in range(replicate_count):
+                    chunk_feature_batches.append(np.concatenate([smi_vecs[rep_idx], seq_vec]))
+
+                chunk_pair_meta.append(
+                    (
+                        gene_id,
+                        metabolite_id,
+                        is_missing_smi,
+                        (metabolite_id in truncated_smiles_metabolite_ids)
+                        if not is_missing_smi
+                        else False,
+                        replicate_count,
+                    )
+                )
+
+            predicted_chunk = model.predict(np.asarray(chunk_feature_batches))
+
+            offset = 0
+            for (
+                gene_id,
+                metabolite_id,
+                is_missing_smi,
+                is_truncated_smi,
+                replicate_count,
+            ) in chunk_pair_meta:
+                replicate_slice = predicted_chunk[offset : offset + replicate_count]
+                stats = _aggregate_log_predictions(np.asarray(replicate_slice))
+                new_rows.append(
+                    {
+                        "ensemble_id": gene_id,
+                        "metabolite_id": metabolite_id,
+                        "missing_smiles": is_missing_smi,
+                        "truncated_smiles": is_truncated_smi,
+                        "cache_type_of_smiles": type_of_smiles,
+                        "cache_amount_of_smiles_replicates": amount_of_smiles_replicates,
+                        **stats,
+                    }
+                )
+                offset += replicate_count
+
+            if (
+                prediction_checkpoint_every_chunks > 0
+                and chunk_index % prediction_checkpoint_every_chunks == 0
+            ):
+                checkpoint_df = pd.concat(
+                    [reused_rows_df, pd.DataFrame(new_rows)],
+                    ignore_index=True,
+                ).reindex(columns=PREDICTION_COLUMNS)
+                checkpoint_df.to_csv(paths.predictions_csv_file, index=False)
+                paths.predictions_json_file.write_text(
+                    checkpoint_df.to_json(orient="records", indent=2),
+                    encoding="utf-8",
+                )
+
+    new_rows_df = pd.DataFrame(new_rows)
+    if new_rows_df.empty:
+        new_rows_df = pd.DataFrame(columns=PREDICTION_COLUMNS + cache_scope_columns)
+
+    predictions_df = pd.concat([reused_rows_df, new_rows_df], ignore_index=True)
+    if predictions_df.empty:
+        predictions_df = pd.DataFrame(columns=PREDICTION_COLUMNS + cache_scope_columns)
+    predictions_df = predictions_df.drop_duplicates(
+        subset=["ensemble_id", "metabolite_id"],
+        keep="last",
+    )
+
+    active_cache_updated = predictions_df.reindex(columns=PREDICTION_COLUMNS + cache_scope_columns)
+    other_scopes = cache_df[
+        ~(
+            (cache_df["cache_type_of_smiles"].astype(str) == str(type_of_smiles))
+            & (cache_replicates.astype(int).eq(int(amount_of_smiles_replicates)))
+        )
+    ]
+    full_cache_df = pd.concat([other_scopes, active_cache_updated], ignore_index=True)
+    full_cache_df.to_csv(cache_file, index=False)
+
+    output_predictions_df = predictions_df.reindex(columns=PREDICTION_COLUMNS)
+    output_predictions_df = output_predictions_df.sort_values(
+        by=["ensemble_id", "metabolite_id"]
+    ).reset_index(drop=True)
+
+    output_predictions_df.to_csv(paths.predictions_csv_file, index=False)
+    paths.predictions_json_file.write_text(
+        output_predictions_df.to_json(orient="records", indent=2), encoding="utf-8"
+    )
+
+    missing_df = _build_missing_report_df(missing_genes, missing_smiles)
+    missing_df.to_csv(paths.missing_csv_file, index=False)
+
+    return paths, output_predictions_df
 
 
 def run_kcat_inference(
