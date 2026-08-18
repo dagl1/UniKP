@@ -800,12 +800,18 @@ def _as_bool(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
-def some_function(
-    a: int,
-    b: str,
-    c: float = 1.0,
-) -> None:
-    print(f"a: {a}, b: {b}, c: {c}")
+def run_kcat_inference_lean(
+    smiles_df: pd.DataFrame,
+    transcript_df: pd.DataFrame,
+    gene_substrate_paris: dict[str, set[str]],
+    chunk_size: int = 200,
+    embedding_batch_size: int = 50,
+    embedding_cache_save_every_batches: int = 1,
+    prediction_checkpoint_every_chunks: int = 10,
+    amount_of_smiles_replicates: int = 50,
+    type_of_smiles: str = "isomeric SMILES",
+):
+    pass
 
 
 def run_kcat_inference(
@@ -1100,7 +1106,8 @@ def run_kcat_inference(
         try:
             from UniKP.utils import split as _split_smiles
         except ModuleNotFoundError:
-            from utils import split as _split_smiles  # noqa:  I001# ty: ignore[unresolved-import]
+            # noqa:  I001# ty: ignore[unresolved-import]
+            from utils import split as _split_smiles
 
         for met_id, smiles in zip(
             smiles_pairs["id"].astype(str),
