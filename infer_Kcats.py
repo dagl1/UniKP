@@ -56,12 +56,12 @@ if sys.version_info <= (3, 10):
         return Path(__file__).resolve().parents[1]
 
 else:
-    from SWAMP.utils.file_handling import get_project_root
+    from VmaxBuilder.utils.file_handling import get_project_root
 
     try:
-        from src.SWAMP.utils.custom_logging import CustomLogger
+        from src.VmaxBuilder.utils.custom_logging import CustomLogger
     except ModuleNotFoundError:
-        from SWAMP.utils.custom_logging import CustomLogger
+        from VmaxBuilder.utils.custom_logging import CustomLogger
 
 try:
     from UniKP.compat_sklearn import safe_load_sklearn_model
@@ -69,14 +69,6 @@ except ModuleNotFoundError:
     from compat_sklearn import (  # ty: ignore[unresolved-import]
         safe_load_sklearn_model,
     )  # ty: ignore[unresolved-import] # noqa: I001
-
-from src.cobrapy_fork.io import load_json_model
-from src.SWAMP.sequence_retrieval import (
-    SequenceMode,
-    infer_species,
-    retrieve_gem_sequences,
-    retrieve_gene_sequences,
-)
 
 
 def _get_logger(logger: CustomLogger | None, print_level: int, log_dir: Path) -> CustomLogger:
@@ -929,7 +921,9 @@ def run_kcat_inference_lean(
     required_metabolite_ids = {metabolite_id for _, metabolite_id in all_pairs}
 
     seq_by_gene = _prepare_lean_sequence_map(transcript_df, required_gene_ids)
-    smiles_by_id = _prepare_lean_smiles_map(smiles_df, required_metabolite_ids, type_of_smiles)
+    smiles_by_id = _prepare_lean_smiles_map(
+        smiles_df, required_metabolite_ids, type_of_smiles
+    )
     truncated_smiles_metabolite_ids = _get_truncated_smiles_ids(smiles_by_id)
 
     sequence_cache = _update_embedding_cache(
@@ -1021,12 +1015,17 @@ def run_kcat_inference_lean(
             raise ValueError("chunk_size must be >= 1")
 
         model = safe_load_sklearn_model(model_pickle)
-        for chunk_index, chunk_start in enumerate(range(0, len(pending_pairs), chunk_size), start=1):
+        for chunk_index, chunk_start in enumerate(
+            range(0, len(pending_pairs), chunk_size), start=1
+        ):
             pair_chunk = pending_pairs[chunk_start : chunk_start + chunk_size]
             chunk_feature_batches = []
             chunk_pair_meta: list[tuple[str, str, bool, bool, int]] = []
 
-            if any(is_missing_smi for _, _, is_missing_smi in pair_chunk) and "" not in smiles_cache:
+            if (
+                any(is_missing_smi for _, _, is_missing_smi in pair_chunk)
+                and "" not in smiles_cache
+            ):
                 empty_embedding = smiles_to_embedding(
                     [""],
                     logger=None,
@@ -1121,7 +1120,9 @@ def run_kcat_inference_lean(
         keep="last",
     )
 
-    active_cache_updated = predictions_df.reindex(columns=PREDICTION_COLUMNS + cache_scope_columns)
+    active_cache_updated = predictions_df.reindex(
+        columns=PREDICTION_COLUMNS + cache_scope_columns
+    )
     other_scopes = cache_df[
         ~(
             (cache_df["cache_type_of_smiles"].astype(str) == str(type_of_smiles))
