@@ -11,3 +11,5 @@ UniKP20Km.pkl
 UniKP20kcat.pkl
 UniKP20kcat_Km.pkl
 models/
+pretrained_models/
+.lookup_cache/

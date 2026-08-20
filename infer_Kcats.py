@@ -170,7 +170,12 @@ def smiles_to_embedding(
     unk_index = 1
     eos_index = 2
     sos_index = 3
-    vocab = WordVocab.load_vocab("vocab.pkl")
+    try:
+        vocab = WordVocab.load_vocab("vocab.pkl")
+    except FileNotFoundError:
+        current_dir = Path(__file__).resolve().parent
+        models = current_dir
+        vocab = WordVocab.load_vocab(str(models / "vocab.pkl"))
 
     truncation_count = 0
 
@@ -198,7 +203,17 @@ def smiles_to_embedding(
         return torch.tensor(x_id), torch.tensor(x_seg)
 
     trfm = TrfmSeq2seq(len(vocab), 256, len(vocab), 4)
-    trfm.load_state_dict(torch.load("trfm_12_23000.pkl", map_location=torch.device("cpu")))
+    current_dir = Path(__file__).resolve().parent
+    try:
+        trfm.load_state_dict(
+            torch.load("trfm_12_23000.pkl", map_location=torch.device("cpu"))
+        )
+    except FileNotFoundError:
+        trfm.load_state_dict(
+            torch.load(
+                str(current_dir / "trfm_12_23000.pkl"), map_location=torch.device("cpu")
+            )
+        )
     trfm.eval()
 
     try:
@@ -249,8 +264,17 @@ def sequence_to_embedding(
     for seq in processed_sequences:
         sequence_examples.append(" ".join(list(seq)))
 
-    tokenizer = T5Tokenizer.from_pretrained("prot_t5_xl_uniref50", do_lower_case=False)
-    model = T5EncoderModel.from_pretrained("prot_t5_xl_uniref50")
+    # get this files folder
+    current_dir = Path(__file__).resolve().parent
+    pretrained_model_dir = current_dir / "pretrained_models" / "prot_t5_xl_uniref50"
+    str_pretrained_model_dir = str(pretrained_model_dir)
+
+    tokenizer = T5Tokenizer.from_pretrained(
+        str_pretrained_model_dir,
+        do_lower_case=False,
+    )
+    model = T5EncoderModel.from_pretrained(str_pretrained_model_dir)
+
     gc.collect()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -259,7 +283,7 @@ def sequence_to_embedding(
 
     features = []
     iterator = enumerate(sequence_examples)
-    if use_tqdm and print_level >= 2:
+    if use_tqdm:
         iterator = enumerate(
             tqdm(sequence_examples, desc="Embedding sequences", unit="seq", leave=False)
         )
@@ -617,7 +641,16 @@ def _update_embedding_cache(
             raise ValueError("save_every_batches must be >= 1")
 
         needed_batches = _chunk_list(needed, batch_size)
-        for batch_idx, needed_batch in enumerate(needed_batches, start=1):
+        # do as tqdm
+        for batch_idx, needed_batch in enumerate(
+            tqdm(
+                needed_batches,
+                desc=f"Embedding {cache_path.name}",
+                unit="batch",
+                leave=False,
+            ),
+            start=1,
+        ):
             new_vectors = vectorizer(needed_batch)
             if new_vectors is None:
                 raise RuntimeError(f"Could not create embeddings for {cache_path.name}")
@@ -799,7 +832,7 @@ def _resolve_lean_model_root() -> Path:
 
 
 def _resolve_lean_model_pickle(model_root: Path) -> Path:
-    model_pickle = model_root / "UniKP20kcat.pkl"
+    model_pickle = model_root / "kcat" / "UniKP for kcat.pkl"
     if model_pickle.exists():
         return model_pickle
 
@@ -812,26 +845,35 @@ def _resolve_lean_model_pickle(model_root: Path) -> Path:
     )
 
 
-def _build_lean_kcat_paths(model_root: Path) -> KcatPaths:
-    output_dir = model_root / "lean_kcat_inference"
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _build_lean_kcat_paths(output_dir: Path, base_cache_dir: Path | None = None) -> KcatPaths:
+    if base_cache_dir is None:
+        current_dir = Path(__file__).resolve().parent
+        base_cache_dir = current_dir
+    lean_output_dir = output_dir / "lean_kcat_inference"
+    lean_output_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_dir = base_cache_dir / ".lookup_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Using lookup cache directory: {cache_dir}")
+
     return KcatPaths(
         output_dir=output_dir,
-        smiles_file=output_dir / "metabolite_smiles.csv",
-        sequence_file=output_dir / "gene_or_transcript_protein_sequences.csv",
-        gene_metabolite_pairs_file=output_dir / "gene_metabolite_pairs.json",
-        gene_metabolite_pairs_legacy_file=output_dir / "gene_smiles_reactions_pairs.json",
-        sequence_tensor_cache_file=output_dir / "sequence_embedding_cache.pkl",
-        smiles_tensor_cache_file=output_dir / "smiles_embedding_cache.pkl",
-        predictions_csv_file=output_dir / "kcat_gene_metabolite_predictions.csv",
-        predictions_json_file=output_dir / "kcat_gene_metabolite_predictions.json",
-        missing_csv_file=output_dir / "missing_genes_and_smiles.csv",
+        smiles_file=lean_output_dir / "metabolite_smiles.csv",
+        sequence_file=lean_output_dir / "gene_or_transcript_protein_sequences.csv",
+        gene_metabolite_pairs_file=lean_output_dir / "gene_metabolite_pairs.json",
+        gene_metabolite_pairs_legacy_file=lean_output_dir
+        / "gene_smiles_reactions_pairs.json",
+        sequence_tensor_cache_file=cache_dir / "sequence_embedding_cache.pkl",
+        smiles_tensor_cache_file=cache_dir / "smiles_embedding_cache.pkl",
+        predictions_csv_file=lean_output_dir / "kcat_gene_metabolite_predictions.csv",
+        predictions_json_file=lean_output_dir / "kcat_gene_metabolite_predictions.json",
+        missing_csv_file=lean_output_dir / "missing_genes_and_smiles.csv",
     )
 
 
-def _flatten_lean_pairs(gene_substrate_paris: dict[str, set[str]]) -> list[tuple[str, str]]:
+def _flatten_lean_pairs(gene_substrate_pairs: dict[str, set[str]]) -> list[tuple[str, str]]:
     all_pairs: list[tuple[str, str]] = []
-    for gene_id, metabolite_ids in gene_substrate_paris.items():
+    for gene_id, metabolite_ids in gene_substrate_pairs.items():
         for metabolite_id in metabolite_ids:
             all_pairs.append((str(gene_id), str(metabolite_id)))
     return sorted(set(all_pairs))
@@ -841,20 +883,20 @@ def _prepare_lean_sequence_map(
     transcript_df: pd.DataFrame,
     required_gene_ids: set[str],
 ) -> dict[str, str]:
-    if "protein_sequence" not in transcript_df.columns:
-        raise ValueError("transcript_df must contain 'protein_sequence' column")
+    if "peptide_seq" not in transcript_df.columns:
+        raise ValueError("transcript_df must contain 'peptide_seq' column")
     if transcript_df.index.hasnans:
         raise ValueError("transcript_df index must contain gene ids (no NaN index values)")
 
-    seq_pairs = transcript_df[["protein_sequence"]].copy()
-    seq_pairs = seq_pairs[seq_pairs["protein_sequence"].notna()]
-    seq_pairs["protein_sequence"] = seq_pairs["protein_sequence"].astype(str)
-    seq_pairs = seq_pairs[seq_pairs["protein_sequence"] != ""]
+    seq_pairs = transcript_df[["peptide_seq"]].copy()
+    seq_pairs = seq_pairs[seq_pairs["peptide_seq"].notna()]
+    seq_pairs["peptide_seq"] = seq_pairs["peptide_seq"].astype(str)
+    seq_pairs = seq_pairs[seq_pairs["peptide_seq"] != ""]
     seq_pairs.index = seq_pairs.index.astype(str)
     seq_pairs = seq_pairs[~seq_pairs.index.duplicated(keep="first")]
     if required_gene_ids:
         seq_pairs = seq_pairs.loc[seq_pairs.index.isin(required_gene_ids)]
-    return seq_pairs["protein_sequence"].to_dict()
+    return seq_pairs["peptide_seq"].to_dict()
 
 
 def _prepare_lean_smiles_map(
@@ -904,19 +946,22 @@ def _load_lean_prediction_cache(cache_file: Path) -> pd.DataFrame:
 def run_kcat_inference_lean(
     smiles_df: pd.DataFrame,
     transcript_df: pd.DataFrame,
-    gene_substrate_paris: dict[str, set[str]],
+    gene_substrate_pairs: dict[str, set[str]],
+    output_path: Path,
+    model_path: Path,
     chunk_size: int = 200,
     embedding_batch_size: int = 50,
     embedding_cache_save_every_batches: int = 1,
     prediction_checkpoint_every_chunks: int = 10,
     amount_of_smiles_replicates: int = 50,
-    type_of_smiles: str = "isomeric SMILES",
+    type_of_smiles: str = "isomeric_SMILES",
 ) -> tuple[KcatPaths, pd.DataFrame]:
+    # print(f"Running lean kcat inference with model: {model_path}")
     model_root = _resolve_lean_model_root()
     model_pickle = _resolve_lean_model_pickle(model_root)
-    paths = _build_lean_kcat_paths(model_root)
+    paths = _build_lean_kcat_paths(output_dir=output_path, base_cache_dir=None)
 
-    all_pairs = _flatten_lean_pairs(gene_substrate_paris)
+    all_pairs = _flatten_lean_pairs(gene_substrate_pairs)
     required_gene_ids = {gene_id for gene_id, _ in all_pairs}
     required_metabolite_ids = {metabolite_id for _, metabolite_id in all_pairs}
 
@@ -926,6 +971,7 @@ def run_kcat_inference_lean(
     )
     truncated_smiles_metabolite_ids = _get_truncated_smiles_ids(smiles_by_id)
 
+    print(f"Total gene-substrate pairs: {len(all_pairs)}")
     sequence_cache = _update_embedding_cache(
         list(set(seq_by_gene.values())),
         paths.sequence_tensor_cache_file,
@@ -935,18 +981,17 @@ def run_kcat_inference_lean(
         save_every_batches=embedding_cache_save_every_batches,
         shared_cache_path=None,
         logger=None,
-        print_level=0,
     )
+    print(f"Total unique sequences: {len(sequence_cache)}")
     smiles_cache = _update_smiles_embedding_cache(
         list(set(smiles_by_id.values())),
         paths.smiles_tensor_cache_file,
         amount_of_replicates=amount_of_smiles_replicates,
         batch_size=embedding_batch_size,
         save_every_batches=embedding_cache_save_every_batches,
-        use_tqdm=False,
+        use_tqdm=True,
         shared_cache_path=None,
         logger=None,
-        print_level=0,
     )
 
     cache_file = paths.output_dir / "kcat_gene_metabolite_predictions_cache.csv"
@@ -1009,15 +1054,20 @@ def run_kcat_inference_lean(
     )
 
     new_rows: list[dict[str, object]] = []
+    print(f"Total pending pairs for inference: {len(pending_pairs)}")
 
     if pending_pairs:
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
         model = safe_load_sklearn_model(model_pickle)
+        print(f"Loaded model from {model_pickle}, starting inference...")
         for chunk_index, chunk_start in enumerate(
             range(0, len(pending_pairs), chunk_size), start=1
         ):
+            print(
+                f"Processing chunk {chunk_index} (pairs {chunk_start} to {chunk_start + chunk_size})"
+            )
             pair_chunk = pending_pairs[chunk_start : chunk_start + chunk_size]
             chunk_feature_batches = []
             chunk_pair_meta: list[tuple[str, str, bool, bool, int]] = []
@@ -1144,6 +1194,11 @@ def run_kcat_inference_lean(
 
     missing_df = _build_missing_report_df(missing_genes, missing_smiles)
     missing_df.to_csv(paths.missing_csv_file, index=False)
+    if model_path is not None:
+        output_predictions_df.to_csv(
+            model_path / "kcat_gene_metabolite_predictions.csv", index=False
+        )
+        missing_df.to_csv(model_path / "missing_genes_and_smiles.csv", index=False)
 
     return paths, output_predictions_df
 
@@ -1666,7 +1721,7 @@ def run_kcat_inference(
 
         rows = []
         chunk_starts = range(0, len(pending_pairs), chunk_size)
-        if use_tqdm and print_level >= 2:
+        if use_tqdm:
             chunk_starts = tqdm(
                 chunk_starts,
                 total=total_chunks,
@@ -1950,6 +2005,9 @@ if __name__ == "__main__":
     alt_model_dir = data_dir / "for_SWAMP" / "models" / "model_inhouse_v9_human"
     smiles_csv = alt_model_dir / "final_SMILES_metabolite_df.csv"
     # additional_mapping_file = model_dir / "MouseGEM_1_8_MGI_gene_ID_mapping.csv"
+
+    # test case, only do 50 pairs for now
+
     run_kcat_inference(
         model_file=model_file,
         smiles_csv_file=smiles_csv,
