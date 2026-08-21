@@ -948,7 +948,7 @@ def run_kcat_inference_lean(
     transcript_df: pd.DataFrame,
     gene_substrate_pairs: dict[str, set[str]],
     output_path: Path,
-    model_path: Path,
+    model_path: Path | None,
     chunk_size: int = 200,
     embedding_batch_size: int = 50,
     embedding_cache_save_every_batches: int = 1,
@@ -1195,6 +1195,9 @@ def run_kcat_inference_lean(
     missing_df = _build_missing_report_df(missing_genes, missing_smiles)
     missing_df.to_csv(paths.missing_csv_file, index=False)
     if model_path is not None:
+        if isinstance(model_path, str):
+            model_path = Path(model_path)
+        model_path.mkdir(parents=True, exist_ok=True)
         output_predictions_df.to_csv(
             model_path / "kcat_gene_metabolite_predictions.csv", index=False
         )
