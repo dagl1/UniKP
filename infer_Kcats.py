@@ -346,8 +346,8 @@ class KcatPaths:
 PREDICTION_COLUMNS = [
     "ensemble_id",
     "metabolite_id",
-    "missing_smiles",
-    "truncated_smiles",
+    "missing",
+    "smiles_longer_than_218",
     "min",
     "max",
     "median",
@@ -1135,8 +1135,8 @@ def run_kcat_inference_lean(
                     {
                         "ensemble_id": gene_id,
                         "metabolite_id": metabolite_id,
-                        "missing_smiles": is_missing_smi,
-                        "truncated_smiles": is_truncated_smi,
+                        "missing": is_missing_smi,
+                        "smiles_longer_than_218": is_truncated_smi,
                         "cache_type_of_smiles": type_of_smiles,
                         "cache_amount_of_smiles_replicates": amount_of_smiles_replicates,
                         **stats,
@@ -1635,7 +1635,7 @@ def run_kcat_inference(
     for gene_id, metabolite_id in all_pairs:
         existing_row = existing_rows_by_pair.get((gene_id, metabolite_id))
         if existing_row is not None:
-            cached_missing_smiles = _as_bool(existing_row.get("missing_smiles", False))
+            cached_missing_smiles = _as_bool(existing_row.get("missing", False))
             # If an older run used missing-SMILES fallback but this run now has
             # SMILES, recompute this pair with full stochastic replicates.
             if cached_missing_smiles and metabolite_id in smiles_by_id:
@@ -1802,8 +1802,8 @@ def run_kcat_inference(
                     {
                         "ensemble_id": gene_id,
                         "metabolite_id": metabolite_id,
-                        "missing_smiles": is_missing_smi,
-                        "truncated_smiles": is_truncated_smi,
+                        "missing": is_missing_smi,
+                        "smiles_longer_than_218": is_truncated_smi,
                         **stats,
                     }
                 )
@@ -1836,6 +1836,11 @@ def run_kcat_inference(
         logger.info("No pending pairs to run; using cached predictions only", print_level=2)
 
     _log_step(logger, "Writing outputs", print_level=2)
+    # convert "missing" and "smiles_longer_than_218" to bool for JSON serialization
+    predictions_df["missing"] = predictions_df["missing"].astype(bool)
+    predictions_df["smiles_longer_than_218"] = predictions_df[
+        "smiles_longer_than_218"
+    ].astype(bool)
     predictions_df = predictions_df.reindex(columns=PREDICTION_COLUMNS)
     predictions_df.to_csv(paths.predictions_csv_file, index=False)
     paths.predictions_json_file.write_text(
