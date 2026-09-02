@@ -17,6 +17,7 @@ from pandas.errors import EmptyDataError
 from tqdm import tqdm
 from transformers import T5EncoderModel, T5Tokenizer
 
+
 # if python version is <3.11 we just create a dummy logger:
 if sys.version_info <= (3, 10):
 
@@ -857,7 +858,7 @@ def _build_lean_kcat_paths(output_dir: Path, base_cache_dir: Path | None = None)
     print(f"Using lookup cache directory: {cache_dir}")
 
     return KcatPaths(
-        output_dir=output_dir,
+        output_dir=lean_output_dir,
         smiles_file=lean_output_dir / "metabolite_smiles.csv",
         sequence_file=lean_output_dir / "gene_or_transcript_protein_sequences.csv",
         gene_metabolite_pairs_file=lean_output_dir / "gene_metabolite_pairs.json",
@@ -955,6 +956,7 @@ def run_kcat_inference_lean(
     prediction_checkpoint_every_chunks: int = 10,
     amount_of_smiles_replicates: int = 50,
     type_of_smiles: str = "isomeric_SMILES",
+    print_level: int = 2,
 ) -> tuple[KcatPaths, pd.DataFrame]:
     # print(f"Running lean kcat inference with model: {model_path}")
     model_root = _resolve_lean_model_root()
@@ -970,8 +972,13 @@ def run_kcat_inference_lean(
         smiles_df, required_metabolite_ids, type_of_smiles
     )
     truncated_smiles_metabolite_ids = _get_truncated_smiles_ids(smiles_by_id)
+    logger = _get_logger(
+        logger=None,
+        print_level=print_level,
+        log_dir=paths.output_dir / "logs",
+    )
 
-    print(f"Total gene-substrate pairs: {len(all_pairs)}")
+    logger.debug(f"Total gene-substrate pairs: {len(all_pairs)}")
     sequence_cache = _update_embedding_cache(
         list(set(seq_by_gene.values())),
         paths.sequence_tensor_cache_file,
@@ -982,7 +989,7 @@ def run_kcat_inference_lean(
         shared_cache_path=None,
         logger=None,
     )
-    print(f"Total unique sequences: {len(sequence_cache)}")
+    logger.debug(f"Total unique sequences: {len(sequence_cache)}")
     smiles_cache = _update_smiles_embedding_cache(
         list(set(smiles_by_id.values())),
         paths.smiles_tensor_cache_file,
@@ -1054,20 +1061,31 @@ def run_kcat_inference_lean(
     )
 
     new_rows: list[dict[str, object]] = []
-    print(f"Total pending pairs for inference: {len(pending_pairs)}")
+    logger.info(
+        f"Total pending pairs for inference: {len(pending_pairs)}; "
+        f"missing_genes={len(missing_genes)}, missing_smiles={len(missing_smiles)}",
+    )
+    print_per_n_chunks = 10
 
     if pending_pairs:
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
         model = safe_load_sklearn_model(model_pickle)
-        print(f"Loaded model from {model_pickle}, starting inference...")
+
+        logger.starting(f"Loaded model from {model_pickle}, starting inference...")
         for chunk_index, chunk_start in enumerate(
             range(0, len(pending_pairs), chunk_size), start=1
         ):
-            print(
-                f"Processing chunk {chunk_index} (pairs {chunk_start} to {chunk_start + chunk_size})"
+            logger.debug(
+                f"Processing chunk {chunk_index} (pairs {chunk_start} to "
+                f"{chunk_start + chunk_size})"
             )
+            if print_per_n_chunks > 0 and chunk_index % print_per_n_chunks == 0:
+                logger.info(
+                    f"Processing chunk {chunk_index} (pairs {chunk_start} to "
+                    f"{chunk_start + chunk_size})"
+                )
             pair_chunk = pending_pairs[chunk_start : chunk_start + chunk_size]
             chunk_feature_batches = []
             chunk_pair_meta: list[tuple[str, str, bool, bool, int]] = []
